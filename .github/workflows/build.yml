@@ -55,7 +55,7 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           release: ${{ startsWith(github.ref, 'refs/tags/v') }}
-          args: "--publish=never"
+          args: ""
           skip_build_deps_install: true
 
       - name: Upload artifacts
