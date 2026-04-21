@@ -95,7 +95,6 @@ function createWindow() {
     minWidth: 1000,
     minHeight: 600,
     title: '数据一致性自动化核对工具',
-    icon: path.join(__dirname, 'public', 'icons', 'api_post64x64.ico'),
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
