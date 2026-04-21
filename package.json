@@ -62,7 +62,7 @@
       "icon": "public/icons/api_post256x256.ico"
     },
     "linux": {
-      "target": ["AppImage", "deb", "rpm", "pacman"],
+      "target": ["AppImage", "deb", "rpm"],
       "icon": "public/icons/api_post256x256.ico"
     }
   }
