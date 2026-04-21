@@ -50,16 +50,20 @@
       ".venv/**/*"
     ],
     "asar": false,
+    "icon": "public/icons/api_post256x256.ico",
     "mac": {
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
-      "target": "dmg"
+      "target": "dmg",
+      "icon": "public/icons/api_post256x256.ico"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "public/icons/api_post256x256.ico"
     },
     "linux": {
-      "target": ["AppImage", "deb", "rpm", "pacman"]
+      "target": ["AppImage", "deb", "rpm", "pacman"],
+      "icon": "public/icons/api_post256x256.ico"
     }
   }
 }
