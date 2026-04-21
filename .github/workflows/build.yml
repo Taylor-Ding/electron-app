@@ -19,28 +19,35 @@ jobs:
           - os: macos-latest
             platform: darwin
             arch: x64
+            artifact_name: darwin-x64
           - os: macos-latest
             platform: darwin
             arch: arm64
+            artifact_name: darwin-arm64
           - os: windows-latest
             platform: win32
             arch: x64
+            artifact_name: win32-x64
           - os: ubuntu-latest
             platform: linux
             arch: x64
             target: AppImage
+            artifact_name: linux-x64-AppImage
           - os: ubuntu-latest
             platform: linux
             arch: x64
             target: deb
+            artifact_name: linux-x64-deb
           - os: ubuntu-latest
             platform: linux
             arch: x64
             target: rpm
+            artifact_name: linux-x64-rpm
           - os: ubuntu-latest
             platform: linux
             arch: x64
             target: pacman
+            artifact_name: linux-x64-pacman
 
     steps:
       - name: Checkout repository
@@ -87,7 +94,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.target ? '-' : '' }}${{ matrix.target || '' }}
+          name: ${{ matrix.artifact_name }}
           path: release/*
           retention-days: 30
 
