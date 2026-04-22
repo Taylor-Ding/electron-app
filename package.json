@@ -43,14 +43,14 @@
     "files": [
       "main.js",
       "dist/**/*",
-      "public/**/*"
+      "public/**/*",
+      "!node_modules/**"
     ],
     "extraResources": [
       "backend/**/*",
       ".venv/**/*"
     ],
     "asar": false,
-    "icon": "public/icons/api_post.svg",
     "mac": {
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
