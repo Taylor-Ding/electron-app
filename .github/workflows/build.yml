@@ -58,12 +58,19 @@ jobs:
           args: "--publish=never"
           skip_build_deps_install: true
 
-      - name: Upload artifacts
+      - name: Upload installer artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.os }}
-          path: release/*
+          path: |
+            release/*.dmg
+            release/*.exe
+            release/*.AppImage
+            release/*.deb
+            release/*.zip
+            release/*.tar.gz
           retention-days: 30
+          if-no-files-found: warn
 
   release:
     needs: build
@@ -83,6 +90,13 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          files: release/**/*
+          files: |
+            release/**/*.dmg
+            release/**/*.exe
+            release/**/*.AppImage
+            release/**/*.deb
+            release/**/*.zip
+            release/**/*.tar.gz
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
