@@ -1,12 +1,12 @@
 {
-  "name": "data-consistency-checker",
+  "name": "api_post_solo",
   "private": true,
   "version": "1.0.0",
   "main": "main.js",
   "type": "module",
-  "description": "数据一致性自动化核对工具 - 分布式系统查-发-查-比数据一致性检查",
+  "description": "API Post Solo - 数据一致性自动化核对工具",
   "author": "Taylor Ding <taylor.ding@example.com>",
-  "homepage": "https://github.com/Taylor-Ding/api_post_trae",
+  "homepage": "https://github.com/Taylor-Ding/electron-app",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -35,8 +35,8 @@
     "vite": "^8.0.4"
   },
   "build": {
-    "appId": "com.example.data-consistency-checker",
-    "productName": "数据一致性自动化核对工具",
+    "appId": "com.taylor.api-post-solo",
+    "productName": "api_post_solo",
     "directories": {
       "output": "release"
     },
@@ -54,13 +54,21 @@
     "mac": {
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
-      "target": "dmg"
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] }
+      ]
     },
     "win": {
-      "target": "nsis"
+      "target": [
+        { "target": "nsis", "arch": ["x64", "arm64", "ia32"] }
+      ]
     },
     "linux": {
-      "target": ["AppImage", "deb", "rpm"]
+      "target": [
+        { "target": "AppImage", "arch": ["x64", "arm64"] },
+        { "target": "deb",      "arch": ["x64", "arm64"] },
+        { "target": "rpm",      "arch": ["x64", "arm64"] }
+      ]
     }
   }
 }

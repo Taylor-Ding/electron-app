@@ -67,6 +67,7 @@ jobs:
             release/*.exe
             release/*.AppImage
             release/*.deb
+            release/*.rpm
             release/*.zip
             release/*.tar.gz
           retention-days: 30
@@ -95,6 +96,7 @@ jobs:
             release/**/*.exe
             release/**/*.AppImage
             release/**/*.deb
+            release/**/*.rpm
             release/**/*.zip
             release/**/*.tar.gz
           fail_on_unmatched_files: false
