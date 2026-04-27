@@ -27,10 +27,55 @@
   --transition: 0.2s ease;
 }
 
+/* ===== 浅色主题 ===== */
+[data-theme="light"] {
+  --bg-primary: #f0ede8;
+  --bg-secondary: #e8e4de;
+  --bg-card: #faf8f5;
+  --bg-input: #ede9e3;
+  --bg-hover: #e0dbd4;
+  --border: #ccc8c0;
+  --border-focus: #5b6abf;
+  --text-primary: #1c1b2e;
+  --text-secondary: #5a576e;
+  --text-muted: #9b98ac;
+  --accent: #4f5ec9;
+  --accent-hover: #3e4db8;
+  --success: #0b9966;
+  --success-bg: rgba(11, 153, 102, 0.1);
+  --danger: #c92b2b;
+  --danger-bg: rgba(201, 43, 43, 0.1);
+  --warning: #c97a06;
+  --warning-bg: rgba(201, 122, 6, 0.1);
+  --info: #1d5fcc;
+  --info-bg: rgba(29, 95, 204, 0.1);
+  --sql: #6c2fc9;
+  --sql-bg: rgba(108, 47, 201, 0.08);
+  --shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+/* 全局颜色平滑过渡 */
+*, *::before, *::after {
+  transition:
+    background-color 0.3s ease,
+    border-color 0.3s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+/* 对动画相关属性单独处理，避免过渡干扰 */
+.spinner,
+.dropdown-menu,
+.modal-overlay,
+.modal-content,
+.btn-theme-toggle .theme-icon {
+  transition: none;
 }
 
 body {
@@ -40,6 +85,7 @@ body {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
+
 
 .app {
   min-height: 100vh;
@@ -176,6 +222,66 @@ body {
   border-color: var(--accent);
   transform: rotate(15deg);
 }
+
+/* ===== 主题切换按钮 ===== */
+.btn-theme-toggle {
+  position: relative;
+  width: 52px;
+  height: 28px;
+  border-radius: 14px;
+  border: 1.5px solid var(--border);
+  background: var(--bg-input);
+  cursor: pointer;
+  overflow: hidden;
+  flex-shrink: 0;
+  /* 独立过渡，不被全局覆盖 */
+  transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.2s ease;
+}
+
+.btn-theme-toggle:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(108, 123, 240, 0.2);
+}
+
+.btn-theme-toggle.mode-light {
+  background: #e8e4de;
+  border-color: #ccc8c0;
+}
+
+.theme-icon-wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  width: 200%;          /* 两个图标并排 */
+  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 深色模式：显示月亮（右侧图标），向左偏移展示 */
+.mode-dark .theme-icon-wrap {
+  transform: translateX(-50%);
+}
+
+/* 浅色模式：显示太阳（左侧图标），不偏移 */
+.mode-light .theme-icon-wrap {
+  transform: translateX(0);
+}
+
+.theme-icon {
+  flex: 0 0 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  line-height: 1;
+  user-select: none;
+  /* 禁止继承全局 transition，避免切换时图标抖动 */
+  transition: none !important;
+}
+
+.theme-icon-sun  { color: #f59e0b; }
+.theme-icon-moon { color: #818cf8; }
+
 
 .dropdown-menu {
   position: absolute;
@@ -937,6 +1043,76 @@ body {
   padding: 16px 20px;
   background: var(--bg-input);
   border-top: 1px solid var(--border);
+}
+
+/* modal footer 内的按钮统一自适应宽度，防止 btn-primary 的 width:100% 生效 */
+.modal-footer .btn-primary,
+.modal-footer .btn-secondary {
+  width: auto;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* 系统设置 footer：左右两端对齐 */
+.modal-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+}
+
+.modal-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ===== 导入/导出按钮 ===== */
+.btn-config-io {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+  letter-spacing: 0.3px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.btn-export {
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--success);
+  border-color: rgba(52, 211, 153, 0.25);
+}
+
+.btn-export:hover {
+  background: rgba(52, 211, 153, 0.2);
+  border-color: var(--success);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(52, 211, 153, 0.2);
+}
+
+.btn-import {
+  background: rgba(251, 191, 36, 0.1);
+  color: var(--warning);
+  border-color: rgba(251, 191, 36, 0.25);
+}
+
+.btn-import:hover {
+  background: rgba(251, 191, 36, 0.2);
+  border-color: var(--warning);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(251, 191, 36, 0.2);
+}
+
+.btn-io-icon {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
 }
 
 .btn-secondary {

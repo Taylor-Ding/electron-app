@@ -1,7 +1,8 @@
-import { app, BrowserWindow, Menu, ipcMain } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, dialog } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { platform } from 'os';
+import { writeFile } from 'fs/promises';
 import { DataConsistencyChecker } from './backend/db_checker.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -55,6 +56,28 @@ ipcMain.handle('run-node-check', async (event, requestPayload) => {
     return await checker.runCheck(requestPayload);
   } catch (err) {
     throw err;
+  }
+});
+
+// 注册 IPC：保存文件（导出配置）
+ipcMain.handle('save-file', async (event, { content, filename }) => {
+  try {
+    const { filePath, canceled } = await dialog.showSaveDialog({
+      defaultPath: filename,
+      filters: [
+        { name: 'TOML 配置文件', extensions: ['toml'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    });
+    if (canceled || !filePath) {
+      return { success: false, cancelled: true };
+    }
+    await writeFile(filePath, content, 'utf-8');
+    console.log('[main] 配置已导出到:', filePath);
+    return { success: true, filePath };
+  } catch (err) {
+    console.error('[main] save-file 失败:', err);
+    return { success: false, error: err.message };
   }
 });
 
