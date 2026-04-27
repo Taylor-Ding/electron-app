@@ -74,6 +74,7 @@ function App() {
   
   // API设置 - 不同环境的请求地址配置
   const [apiSettings, setApiSettings] = useState({
+    route_url: 'http://route-server.example.com/testtool/routeQuery', // 路由服务器地址，不受环境变化影响
     T1: {
       request_url: 'http://t1-api.example.com/api/business',
       mac_url: 'http://t1-api.example.com/api/mac'
@@ -233,7 +234,7 @@ function App() {
     }
   };
 
-  const extractConditions = (requestData, tableName, routingKey, tableResults = {}) => {
+  const extractConditions = async (requestData, tableName, routingKey, tableResults = {}) => {
     addLog(`提取表 ${tableName} 的查询条件...`);
     const config = systemSettings.tables[tableName];
     if (!config) {
@@ -258,9 +259,49 @@ function App() {
           break;
         case 'route':
           if (routingKey) {
-            value = extractValue(routingKey, condition.path);
-            if (value) {
-              addLog(`  从路由结果提取 ${condition.field}: ${value}`);
+            if (condition.field === 'cust_no' && routingKey.type === 'medium_no') {
+              // 当路由键是medium_no时，调用路由服务器routeQuery接口获取cust_no
+              addLog(`  路由键是medium_no，调用路由服务器routeQuery接口获取cust_no`);
+              try {
+                const routeUrl = apiSettings.route_url;
+                if (!routeUrl) {
+                  throw new Error('路由服务器地址(route_url)未配置，请在API设置中填写');
+                }
+                addLog(`  调用路由查询接口: ${routeUrl}`);
+                addLog(`  查询参数: medium_no = ${routingKey.value}`);
+                
+                const routeResponse = await axios.get(routeUrl, { params: { mediumNo: routingKey.value } });
+                
+                let respData = routeResponse.data;
+                value = null;
+
+                // 如果返回格式包含 code 和 data 字段（且 data 是 JSON 字符串）
+                if (respData && respData.code === 200 && respData.data) {
+                  try {
+                    const parsedData = typeof respData.data === 'string' ? JSON.parse(respData.data) : respData.data;
+                    value = parsedData.custNo || parsedData.cust_no;
+                  } catch (e) {
+                    addLog(`  警告: 尝试解析 data 字段为 JSON 失败: ${e.message}`, 'WARN');
+                  }
+                }
+
+                // 兜底逻辑：直接在顶层找
+                if (!value) {
+                  value = respData?.custNo || respData?.cust_no;
+                }
+
+                if (!value || typeof value !== 'string') {
+                  throw new Error(`路由查询返回数据异常或无法提取客户号: ${JSON.stringify(routeResponse.data)}`);
+                }
+                addLog(`  从路由查询获取 cust_no: ${value}`);
+              } catch (error) {
+                addLog(`  错误: 路由查询失败: ${error.message}`, 'ERROR');
+              }
+            } else {
+              value = extractValue(routingKey, condition.path);
+              if (value) {
+                addLog(`  从路由结果提取 ${condition.field}: ${value}`);
+              }
             }
           }
           break;
@@ -271,7 +312,11 @@ function App() {
             value = extractValue(tableResults[depTable], depField);
             if (value) {
               addLog(`  从表 ${depTable} 提取 ${condition.field}: ${value}`);
+            } else {
+              addLog(`  警告: 从表 ${depTable} 提取 ${depField} 失败，值为 null 或 undefined`, 'WARN');
             }
+          } else {
+            addLog(`  警告: 依赖表 ${depTable} 不存在或未查询`, 'WARN');
           }
           break;
       }
@@ -298,6 +343,16 @@ function App() {
     setResults([]);
     setLogs([]);
     setActiveTab('log');
+
+    // 每次执行前，主动将最新 tableSettings 同步给主进程（兜底机制）
+    if (window && window.require) {
+      try {
+        const { ipcRenderer } = window.require('electron');
+        await ipcRenderer.invoke('save-table-settings', systemSettings.tables);
+      } catch (e) {
+        console.warn('[renderer] pre-sync tableSettings failed:', e);
+      }
+    }
 
     try {
       addLog('开始执行数据一致性检查...');
@@ -417,15 +472,70 @@ function App() {
 
       addLog('开始提取各表的查询条件...');
       const tableConditions = {};
-      // 这里可以根据表依赖关系排序，确保依赖的表先查询
-      // 暂时按顺序处理
+      
+      // 只提取来源为 request / route 的初始条件（非表依赖条件），
+      // 表依赖条件（source=table）由后端在顺序查询时动态填充。
       for (const table of tables) {
         if (table.name) {
           try {
-            const conditions = extractConditions(requestData, table.name, routingKey);
+            const config = systemSettings.tables[table.name];
+            if (!config) {
+              addLog(`警告: 表 ${table.name} 没有配置查询条件`, 'WARN');
+              tableConditions[table.name] = {};
+              continue;
+            }
+            const conditions = {};
+            for (const cond of config.conditionFields) {
+              if (cond.source === 'table') {
+                // 跳过表依赖条件，交由后端处理
+                addLog(`  跳过表依赖条件 ${cond.field}（将由后端从依赖表结果中提取）`);
+                continue;
+              }
+              let value = null;
+              if (cond.source === 'request') {
+                value = extractValue(requestData, cond.path);
+                if (value) addLog(`  从请求报文提取 ${cond.field}: ${value}`);
+              } else if (cond.source === 'route') {
+                if (routingKey) {
+                  if (cond.field === 'cust_no' && routingKey.type === 'medium_no') {
+                    addLog(`  路由键是medium_no，调用路由服务器routeQuery接口获取cust_no`);
+                    try {
+                      const routeUrl = apiSettings.route_url;
+                      if (!routeUrl) throw new Error('路由服务器地址(route_url)未配置，请在API设置中填写');
+                      addLog(`  调用路由查询接口: ${routeUrl}`);
+                      const routeResponse = await axios.get(routeUrl, { params: { mediumNo: routingKey.value } });
+                      let respData = routeResponse.data;
+                      if (respData && respData.code === 200 && respData.data) {
+                        try {
+                          const parsedData = typeof respData.data === 'string' ? JSON.parse(respData.data) : respData.data;
+                          value = parsedData.custNo || parsedData.cust_no;
+                        } catch (e) {
+                          addLog(`  警告: 尝试解析data字段为JSON失败: ${e.message}`, 'WARN');
+                        }
+                      }
+                      if (!value) value = respData?.custNo || respData?.cust_no;
+                      if (!value || typeof value !== 'string') throw new Error(`路由查询返回数据异常: ${JSON.stringify(routeResponse.data)}`);
+                      addLog(`  从路由查询获取 cust_no: ${value}`);
+                    } catch (error) {
+                      addLog(`  错误: 路由查询失败: ${error.message}`, 'ERROR');
+                    }
+                  } else {
+                    value = extractValue(routingKey, cond.path);
+                    if (value) addLog(`  从路由结果提取 ${cond.field}: ${value}`);
+                  }
+                }
+              }
+              if (value !== null && value !== undefined) {
+                conditions[cond.field] = value;
+              } else if (cond.required) {
+                addLog(`  错误: 必填字段 ${cond.field} 无法提取值`, 'ERROR');
+              }
+            }
             tableConditions[table.name] = conditions;
+            addLog(`  表 ${table.name} 初始条件: ${JSON.stringify(conditions)}`);
           } catch (condError) {
             addLog(`提取表 ${table.name} 查询条件失败: ${condError.message}`, 'ERROR');
+            tableConditions[table.name] = {};
           }
         }
       }
@@ -450,22 +560,43 @@ function App() {
         }
       }
 
-      addLog('调用后端API执行数据一致性检查...');
+      addLog('通过本地 Node.js 进程执行数据一致性检查...');
       try {
-        const checkResponse = await axios.post('http://localhost:8000/api/check', {
+        const requestPayload = {
           apiResponse: apiResponse,
           tables: tables.filter(t => t.name).map(t => t.name),
           requestData: requestData,
           routingKey: routingKey,
-          tableConditions: tableConditions
-        });
+          tableConditions: tableConditions,
+          // 传入表配置，让后端能处理跨表依赖条件（source=table）
+          tableSettings: systemSettings.tables,
+          environment: selectedEnvironment
+        };
 
-        const responseLogs = checkResponse.data?.logs || [];
+        let checkData;
+
+        if (window && window.require) {
+          addLog('检测到 Electron 桌面环境，通过主进程启动本地 Node.js 检查...', 'INFO');
+          try {
+            const { ipcRenderer } = window.require('electron');
+            checkData = await ipcRenderer.invoke('run-node-check', requestPayload);
+          } catch (err) {
+            addLog(`主进程 Node.js 调用失败: ${err.message}`, 'ERROR');
+            throw err;
+          }
+        } else {
+          // 浏览器环境 fallback
+          addLog('纯浏览器环境下无法唤起子进程，回退到后台 HTTP 接口...', 'WARN');
+          const res = await axios.post('http://localhost:8000/api/check', requestPayload);
+          checkData = res.data;
+        }
+
+        const responseLogs = checkData?.logs || [];
         for (const log of responseLogs) {
           addLog(log.message, log.level || 'INFO');
         }
 
-        const backendResults = (checkResponse.data?.results || []).map(result => ({
+        const backendResults = (checkData?.results || []).map(result => ({
           table: result.table,
           status: result.status === '通过' ? '通过' : result.status === '失败' ? '失败' : '错误',
           message: result.message,
@@ -478,14 +609,9 @@ function App() {
         setResults(backendResults);
         addLog('断言结果已生成');
         setTimeout(() => setActiveTab('result'), 800);
-      } catch (apiError) {
-        addLog(`API调用失败: ${apiError.message}`, 'ERROR');
-        if (apiError.response?.data?.logs) {
-          for (const log of apiError.response.data.logs) {
-            addLog(log.message, log.level || 'ERROR');
-          }
-        }
-        throw apiError;
+      } catch (err) {
+        addLog(`本地 Python 执行失败: ${err.message}`, 'ERROR');
+        throw err;
       }
     } catch (err) {
       addLog(`执行失败: ${err.message}`, 'ERROR');
@@ -673,6 +799,16 @@ function App() {
   const handleSaveSystemSettings = () => {
     // 保存系统配置到本地存储
     localStorage.setItem('systemSettings', JSON.stringify(systemSettings));
+    // 同步 tableSettings 给主进程缓存，作为兜底
+    if (window && window.require) {
+      try {
+        const { ipcRenderer } = window.require('electron');
+        ipcRenderer.invoke('save-table-settings', systemSettings.tables)
+          .catch(e => console.warn('[renderer] save-table-settings failed:', e));
+      } catch (e) {
+        console.warn('[renderer] ipc not available:', e);
+      }
+    }
     setShowSystemSettings(false);
     addLog('系统配置保存成功');
   };
@@ -809,7 +945,20 @@ function App() {
     const savedSystemSettings = localStorage.getItem('systemSettings');
     if (savedSystemSettings) {
       try {
-        setSystemSettings(JSON.parse(savedSystemSettings));
+        const parsed = JSON.parse(savedSystemSettings);
+        // 校验数据格式，过滤掉 config 为 null/undefined 的条目
+        if (parsed && parsed.tables && typeof parsed.tables === 'object') {
+          const sanitizedTables = {};
+          for (const [tName, tConfig] of Object.entries(parsed.tables)) {
+            if (tConfig && typeof tConfig === 'object') {
+              sanitizedTables[tName] = {
+                primaryKey: tConfig.primaryKey || '',
+                conditionFields: Array.isArray(tConfig.conditionFields) ? tConfig.conditionFields : []
+              };
+            }
+          }
+          setSystemSettings({ tables: sanitizedTables });
+        }
       } catch (error) {
         console.error('加载系统配置失败:', error);
       }
@@ -1075,6 +1224,25 @@ function App() {
               </button>
             </div>
             <div className="modal-body">
+              {/* 全局路由服务器地址 - 不受环境影响 */}
+              <div className="api-setting-card api-setting-card--global">
+                <div className="api-setting-header">
+                  <h4>🌐 路由服务器地址</h4>
+                  <span className="api-setting-badge">全局 · 不受环境影响</span>
+                </div>
+                <div className="api-setting-body">
+                  <div className="api-setting-field">
+                    <label>路由查询地址 (route_url)</label>
+                    <input
+                      type="text"
+                      value={apiSettings.route_url || ''}
+                      onChange={(e) => setApiSettings(prev => ({ ...prev, route_url: e.target.value }))}
+                      className="input"
+                      placeholder="输入路由服务器地址，例如 http://route-server/testtool/routeQuery"
+                    />
+                  </div>
+                </div>
+              </div>
               <div className="api-settings-grid">
                 {environmentOptions.map((env) => (
                   <div key={env} className="api-setting-card">
@@ -1395,7 +1563,7 @@ function App() {
               <div className="system-settings-container">
                 <h4>表配置</h4>
                 <div className="table-configs">
-                  {Object.entries(systemSettings.tables).map(([tableName, config]) => (
+                  {Object.entries(systemSettings.tables).filter(([, config]) => config && typeof config === 'object').map(([tableName, config]) => (
                     <div key={tableName} className="table-config-card">
                       <div className="table-config-header">
                         <input
@@ -1406,8 +1574,14 @@ function App() {
                             if (newTableName && newTableName !== tableName) {
                               setSystemSettings(prev => {
                                 const newSettings = { ...prev };
-                                newSettings.tables[newTableName] = newSettings.tables[tableName];
-                                delete newSettings.tables[tableName];
+                                const existing = newSettings.tables[tableName];
+                                if (existing) {
+                                  newSettings.tables = {
+                                    ...newSettings.tables,
+                                    [newTableName]: existing
+                                  };
+                                  delete newSettings.tables[tableName];
+                                }
                                 return newSettings;
                               });
                             }

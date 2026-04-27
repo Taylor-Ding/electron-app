@@ -1,8 +1,8 @@
-import { app, BrowserWindow, Menu } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
 import { platform } from 'os';
+import { DataConsistencyChecker } from './backend/db_checker.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,73 +13,50 @@ app.commandLine.appendSwitch('disable-software-rasterizer');
 app.commandLine.appendSwitch('no-sandbox');
 app.commandLine.appendSwitch('disable-setuid-sandbox');
 
-let backendProcess = null;
-
 function startBackend() {
-  // 在打包环境中，后端和虚拟环境在 extraResources 目录下
-  let resourcesPath;
-  if (app.isPackaged) {
-    resourcesPath = process.resourcesPath;
-  } else {
-    resourcesPath = __dirname;
-  }
-  
-  // 尝试多种Python路径
-  const possiblePythonPaths = [];
-  
-  // 1. 首先尝试虚拟环境中的Python
-  if (platform() === 'win32') {
-    possiblePythonPaths.push(path.join(resourcesPath, '.venv', 'Scripts', 'python.exe'));
-    possiblePythonPaths.push(path.join(__dirname, '.venv', 'Scripts', 'python.exe'));
-  } else {
-    possiblePythonPaths.push(path.join(resourcesPath, '.venv', 'bin', 'python'));
-    possiblePythonPaths.push(path.join(__dirname, '.venv', 'bin', 'python'));
-  }
-  
-  // 2. 然后尝试系统Python
-  possiblePythonPaths.push('python3');
-  possiblePythonPaths.push('python');
-  
-  const backendPath = path.join(resourcesPath, 'backend', 'api_server.py');
-  const backendCwd = path.join(resourcesPath, 'backend');
-  
-  // 尝试找到可用的Python
-  let pythonExec = null;
-  for (const possiblePath of possiblePythonPaths) {
-    try {
-      console.log(`Trying Python: ${possiblePath}`);
-      // 测试Python是否可用
-      require('child_process').execFileSync(possiblePath, ['--version'], { stdio: 'ignore' });
-      pythonExec = possiblePath;
-      console.log(`Found working Python: ${pythonExec}`);
-      break;
-    } catch (error) {
-      console.log(`Python path ${possiblePath} not working`);
-    }
-  }
-  
-  if (!pythonExec) {
-    console.error('无法找到可用的Python解释器！');
-    return;
-  }
-  
-  console.log(`Starting backend with Python: ${pythonExec}`);
-  console.log(`Backend script: ${backendPath}`);
-  console.log(`Backend cwd: ${backendCwd}`);
-  
-  backendProcess = spawn(pythonExec, [backendPath], {
-    cwd: backendCwd,
-    stdio: 'inherit'
-  });
-
-  backendProcess.on('error', (error) => {
-    console.error('启动后端服务失败:', error);
-  });
-
-  backendProcess.on('exit', (code) => {
-    console.log('后端服务退出，退出码:', code);
-  });
+  console.log('Backend execution has been migrated to Node.js.');
 }
+
+// 主进程缓存的 tableSettings，即使旧表单页面没有传入也能使用
+let cachedTableSettings = {};
+
+// 注册 IPC：前端主动保存 tableSettings到主进程
+ipcMain.handle('save-table-settings', async (event, tableSettings) => {
+  if (tableSettings && typeof tableSettings === 'object') {
+    cachedTableSettings = tableSettings;
+    console.log('[main] tableSettings cached, tables:', Object.keys(tableSettings));
+  }
+  return { ok: true };
+});
+
+// 注册 IPC 调用处理 JS 版本的数据校验
+ipcMain.handle('run-node-check', async (event, requestPayload) => {
+  try {
+    let resourcesPath;
+    if (app.isPackaged) {
+      resourcesPath = process.resourcesPath;
+    } else {
+      resourcesPath = __dirname;
+    }
+    const configPath = path.join(resourcesPath, 'backend', 'config', 'config.json');
+    const checker = new DataConsistencyChecker(configPath);
+
+    // 如果 payload 里没有 tableSettings，用主进程缓存的干干
+    if (!requestPayload.tableSettings || Object.keys(requestPayload.tableSettings).length === 0) {
+      if (Object.keys(cachedTableSettings).length > 0) {
+        console.log('[main] tableSettings missing in payload, using cached version');
+        requestPayload = { ...requestPayload, tableSettings: cachedTableSettings };
+      }
+    } else {
+      // 更新缓存
+      cachedTableSettings = requestPayload.tableSettings;
+    }
+
+    return await checker.runCheck(requestPayload);
+  } catch (err) {
+    throw err;
+  }
+});
 
 function stopBackend() {
   if (backendProcess) {

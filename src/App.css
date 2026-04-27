@@ -57,6 +57,9 @@ body {
   background: var(--bg-secondary);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
 }
 
 .header-left {
@@ -967,11 +970,21 @@ body {
   overflow: hidden;
 }
 
+.api-setting-card--global {
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 20px rgba(108, 123, 240, 0.2);
+  margin-bottom: 16px;
+}
+
 .api-setting-header {
   padding: 12px 16px;
   background: var(--bg-input);
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
+
 
 .api-setting-header h4 {
   font-size: 14px;
@@ -979,6 +992,18 @@ body {
   color: var(--text-primary);
   margin: 0;
 }
+
+.api-setting-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 20px;
+  background: rgba(108, 123, 240, 0.15);
+  color: var(--accent);
+  border: 1px solid rgba(108, 123, 240, 0.3);
+  letter-spacing: 0.3px;
+}
+
 
 .api-setting-body {
   padding: 16px;

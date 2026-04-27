@@ -40,6 +40,20 @@ lerna-debug.log*
 .parcel-cache/
 .eslintcache
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary files
+scratch.py
+test_hash.mjs
+backend/cli_check.py
+backend/db_checker.js
+backend/hash_utils.js
+quick-git.sh
+release.py
+
 # Electron
 *.dmg
 *.exe
