@@ -72,10 +72,13 @@ function App() {
     const saved = localStorage.getItem('themeMode');
     return saved !== null ? saved === 'dark' : true;
   });
+  const [showJmxPicker, setShowJmxPicker] = useState(false);
+  const [jmxRequests, setJmxRequests] = useState([]);
   const logsRef = useRef(null);
   const envDropdownRef = useRef(null);
   const settingsDropdownRef = useRef(null);
   const importFileRef = useRef(null);
+  const jmxFileRef = useRef(null);
   
   // API设置 - 不同环境的请求地址配置
   const [apiSettings, setApiSettings] = useState({
@@ -263,24 +266,37 @@ function App() {
           }
           break;
         case 'route':
-          if (routingKey) {
-            if (condition.field === 'cust_no' && routingKey.type === 'medium_no') {
-              // 当路由键是medium_no时，调用路由服务器routeQuery接口获取cust_no
-              addLog(`  路由键是medium_no，调用路由服务器routeQuery接口获取cust_no`);
+          if (condition.field === 'cust_no') {
+            let mediumNoToQuery = null;
+            if (condition.path) {
+              mediumNoToQuery = extractValue(requestData, condition.path);
+              if (mediumNoToQuery) {
+                addLog(`  从报文路径 ${condition.path} 提取到介质号: ${mediumNoToQuery}`);
+              } else {
+                addLog(`  警告: 无法从报文路径 ${condition.path} 提取到介质号`, 'WARN');
+              }
+            }
+            
+            if (!mediumNoToQuery && routingKey && routingKey.type === 'medium_no') {
+              mediumNoToQuery = routingKey.value;
+              addLog(`  使用默认路由键提取介质号: ${mediumNoToQuery}`);
+            }
+
+            if (mediumNoToQuery) {
+              addLog(`  调用路由服务器routeQuery接口获取cust_no`);
               try {
                 const routeUrl = apiSettings.route_url;
                 if (!routeUrl) {
                   throw new Error('路由服务器地址(route_url)未配置，请在API设置中填写');
                 }
                 addLog(`  调用路由查询接口: ${routeUrl}`);
-                addLog(`  查询参数: medium_no = ${routingKey.value}`);
+                addLog(`  查询参数: mediumNo = ${mediumNoToQuery}`);
                 
-                const routeResponse = await axios.get(routeUrl, { params: { mediumNo: routingKey.value } });
+                const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery } });
                 
                 let respData = routeResponse.data;
                 value = null;
 
-                // 如果返回格式包含 code 和 data 字段（且 data 是 JSON 字符串）
                 if (respData && respData.code === 200 && respData.data) {
                   try {
                     const parsedData = typeof respData.data === 'string' ? JSON.parse(respData.data) : respData.data;
@@ -290,7 +306,6 @@ function App() {
                   }
                 }
 
-                // 兜底逻辑：直接在顶层找
                 if (!value) {
                   value = respData?.custNo || respData?.cust_no;
                 }
@@ -303,6 +318,10 @@ function App() {
                 addLog(`  错误: 路由查询失败: ${error.message}`, 'ERROR');
               }
             } else {
+              addLog(`  错误: 无法获取介质号，跳过路由查询`, 'ERROR');
+            }
+          } else {
+            if (routingKey) {
               value = extractValue(routingKey, condition.path);
               if (value) {
                 addLog(`  从路由结果提取 ${condition.field}: ${value}`);
@@ -501,14 +520,29 @@ function App() {
                 value = extractValue(requestData, cond.path);
                 if (value) addLog(`  从请求报文提取 ${cond.field}: ${value}`);
               } else if (cond.source === 'route') {
-                if (routingKey) {
-                  if (cond.field === 'cust_no' && routingKey.type === 'medium_no') {
-                    addLog(`  路由键是medium_no，调用路由服务器routeQuery接口获取cust_no`);
+                if (cond.field === 'cust_no') {
+                  let mediumNoToQuery = null;
+                  if (cond.path) {
+                    mediumNoToQuery = extractValue(requestData, cond.path);
+                    if (mediumNoToQuery) {
+                      addLog(`  从报文路径 ${cond.path} 提取到介质号: ${mediumNoToQuery}`);
+                    } else {
+                      addLog(`  警告: 无法从报文路径 ${cond.path} 提取到介质号`, 'WARN');
+                    }
+                  }
+                  
+                  if (!mediumNoToQuery && routingKey && routingKey.type === 'medium_no') {
+                    mediumNoToQuery = routingKey.value;
+                    addLog(`  使用默认路由键提取介质号: ${mediumNoToQuery}`);
+                  }
+
+                  if (mediumNoToQuery) {
+                    addLog(`  调用路由服务器routeQuery接口获取cust_no`);
                     try {
                       const routeUrl = apiSettings.route_url;
                       if (!routeUrl) throw new Error('路由服务器地址(route_url)未配置，请在API设置中填写');
                       addLog(`  调用路由查询接口: ${routeUrl}`);
-                      const routeResponse = await axios.get(routeUrl, { params: { mediumNo: routingKey.value } });
+                      const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery } });
                       let respData = routeResponse.data;
                       if (respData && respData.code === 200 && respData.data) {
                         try {
@@ -525,6 +559,10 @@ function App() {
                       addLog(`  错误: 路由查询失败: ${error.message}`, 'ERROR');
                     }
                   } else {
+                    addLog(`  错误: 无法获取介质号，跳过路由查询`, 'ERROR');
+                  }
+                } else {
+                  if (routingKey) {
                     value = extractValue(routingKey, cond.path);
                     if (value) addLog(`  从路由结果提取 ${cond.field}: ${value}`);
                   }
@@ -1359,6 +1397,158 @@ function App() {
     localStorage.setItem('themeMode', isDarkMode ? 'dark' : 'light');
   }, [isDarkMode]);
 
+  // ===== JMX 导入功能 =====
+
+  /**
+   * 解析 JMeter .jmx 文件（XML），提取所有 HTTP 请求的报文
+   * 支持 postBodyRaw=true 的 JSON 请求体
+   */
+  const parseJmxFile = (xmlText) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlText, 'text/xml');
+    const parseError = doc.querySelector('parsererror');
+    if (parseError) throw new Error('文件不是有效的 XML/JMX 格式');
+
+    const samplers = Array.from(doc.querySelectorAll('HTTPSamplerProxy'));
+    if (samplers.length === 0) throw new Error('文件中未找到 HTTP 请求样本，请检查 JMX 文件');
+
+    return samplers.map((sampler, idx) => {
+      const getProp = (name, tag = 'stringProp') => {
+        const el = sampler.querySelector(`${tag}[name="${name}"]`);
+        return el ? el.textContent.trim() : '';
+      };
+
+      const testname = sampler.getAttribute('testname') || `请求 ${idx + 1}`;
+      const protocol  = getProp('HTTPSampler.protocol') || 'http';
+      const domain    = getProp('HTTPSampler.domain');
+      const port      = getProp('HTTPSampler.port');
+      const path      = getProp('HTTPSampler.path');
+      const method    = getProp('HTTPSampler.method') || 'POST';
+      const isRawBody = getProp('HTTPSampler.postBodyRaw', 'boolProp') === 'true';
+
+      let body = '';
+      if (isRawBody) {
+        // Raw body 存放在 Arguments.arguments 下的第一个 elementProp 的 Argument.value 中
+        const argValue = sampler.querySelector(
+          'collectionProp[name="Arguments.arguments"] > elementProp > stringProp[name="Argument.value"]'
+        );
+        // 提取后先做基础清洗：去 BOM、统一换行、去首尾空白
+        const raw = argValue ? argValue.textContent : '';
+        body = raw
+          .replace(/^\uFEFF/, '')
+          .replace(/\r\n/g, '\n')
+          .replace(/\r/g, '\n')
+          .trim();
+      } else {
+        // 键对形式的参数，尝试拼成 JSON
+        const params = {};
+        const argItems = sampler.querySelectorAll(
+          'collectionProp[name="Arguments.arguments"] > elementProp'
+        );
+        argItems.forEach(item => {
+          const nameEl  = item.querySelector('stringProp[name="Argument.name"]');
+          const valueEl = item.querySelector('stringProp[name="Argument.value"]');
+          if (nameEl && valueEl && nameEl.textContent.trim()) {
+            params[nameEl.textContent.trim()] = valueEl.textContent.trim();
+          }
+        });
+        if (Object.keys(params).length > 0) {
+          try { body = JSON.stringify(params, null, 2); } catch { body = ''; }
+        }
+      }
+
+      // 拼接 URL
+      let url = '';
+      if (domain) {
+        const portPart = (port && port !== '80' && port !== '443') ? `:${port}` : '';
+        url = `${protocol}://${domain}${portPart}${path}`;
+      }
+
+      return { testname, url, method, body };
+    }).filter(r => r.body); // 过滤掉没有报文的请求
+  };
+
+  /** 文件选择后处理 */
+  const handleJmxFileSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = ''; // 允许重复选择同一文件
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const requests = parseJmxFile(ev.target.result);
+        if (requests.length === 0) {
+          alert('未找到含有请求体的 HTTP 请求，请确认 JMX 中展开了「Post Body Data」');
+          return;
+        }
+        if (requests.length === 1) {
+          // 单个直接填充
+          handleJmxRequestSelect(requests[0]);
+        } else {
+          // 多个弹出选择器
+          setJmxRequests(requests);
+          setShowJmxPicker(true);
+        }
+      } catch (err) {
+        alert(`JMX 解析失败：${err.message}`);
+      }
+    };
+    reader.readAsText(file, 'utf-8');
+  };
+
+  /** 选择报文后填充请求区 */
+  /** 清洗并格式化 JMX 提取到的 body 文本 */
+  const cleanJmxBody = (raw) => {
+    if (!raw) return '';
+    let s = String(raw);
+    
+    // 1. 去除 BOM 和统一换行
+    s = s.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    s = s.trim();
+
+    // 2. 尝试容错处理：去除导致 JSON.parse 失败的常见数组/对象末尾逗号
+    const fixedForJson = s.replace(/,\s*([}\]])/g, '$1');
+
+    try {
+      // 3. 优先尝试标准 JSON 格式化（能完美解决同一属性换行的问题）
+      return JSON.stringify(JSON.parse(fixedForJson), null, 2);
+    } catch {
+      // 4. 解析失败（存在 JMeter 变量等）：使用降级的伪 JSON 格式化器
+      const lines = s.split('\n')
+        .map(l => l.trim()) // 强制去除首尾空白（避免隐藏空白符导致空行存留）
+        .filter(l => l !== ''); // 彻底干掉空行
+        
+      let indentLevel = 0;
+      const formatted = [];
+      
+      for (const line of lines) {
+        // 如果这行以关闭括号开头，先减少缩进
+        if (line.match(/^[}\]]/)) {
+          indentLevel = Math.max(0, indentLevel - 1);
+        }
+        
+        formatted.push('  '.repeat(indentLevel) + line);
+        
+        // 计算行内大括号、方括号带来的缩进变化
+        const openCount = (line.match(/[{[]/g) || []).length;
+        const closeCount = (line.match(/[}\]]/g) || []).length;
+        indentLevel += (openCount - closeCount);
+        indentLevel = Math.max(0, indentLevel);
+      }
+      
+      return formatted.join('\n');
+    }
+  };
+
+  /** 选择报文后填充请求区 */
+  const handleJmxRequestSelect = (req) => {
+    const cleaned = cleanJmxBody(req.body);
+    setRequestBody(cleaned);
+    setShowJmxPicker(false);
+    addLog(`已导入 JMX 报文：${req.testname}`);
+  };
+
+
   // 从本地存储加载API设置
   useEffect(() => {
     const savedSettings = localStorage.getItem('apiSettings');
@@ -1501,6 +1691,21 @@ function App() {
             <div className="card-header">
               <span className="card-icon">📋</span>
               <span className="card-title">请求报文</span>
+              <button
+                className="btn-jmx-import"
+                onClick={() => jmxFileRef.current?.click()}
+                title="从 JMeter JMX 脚本导入报文"
+              >
+                <span className="btn-jmx-icon">⇣</span>
+                JMX
+              </button>
+              <input
+                ref={jmxFileRef}
+                type="file"
+                accept=".jmx,application/xml,text/xml"
+                style={{ display: 'none' }}
+                onChange={handleJmxFileSelect}
+              />
             </div>
             <div className="card-body card-body-grow">
               <textarea
@@ -2303,7 +2508,42 @@ function App() {
         </div>
       )}
 
-      {/* 隐藏的文件导入 input */}
+      {/* JMX 多报文选择器 Modal */}
+      {showJmxPicker && (
+        <div className="modal-overlay" onClick={() => setShowJmxPicker(false)}>
+          <div className="modal-content jmx-picker-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-icon">📄</span>
+              <span className="modal-title">选择 JMX 报文</span>
+              <span className="modal-subtitle">检测到 {jmxRequests.length} 个 HTTP 请求，请选择要导入的报文</span>
+              <button className="modal-close" onClick={() => setShowJmxPicker(false)}>×</button>
+            </div>
+            <div className="jmx-list">
+              {jmxRequests.map((req, idx) => (
+                <button
+                  key={idx}
+                  className="jmx-item"
+                  onClick={() => handleJmxRequestSelect(req)}
+                >
+                  <div className="jmx-item-header">
+                    <span className={`jmx-method-badge method-${req.method.toLowerCase()}`}>
+                      {req.method}
+                    </span>
+                    <span className="jmx-item-name">{req.testname}</span>
+                    <span className="jmx-item-index">#{idx + 1}</span>
+                  </div>
+                  {req.url && (
+                    <div className="jmx-item-url">{req.url}</div>
+                  )}
+                  <div className="jmx-item-preview">
+                    {req.body.slice(0, 120)}{req.body.length > 120 ? '...' : ''}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       <input
         ref={importFileRef}
         type="file"
