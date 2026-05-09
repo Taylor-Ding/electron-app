@@ -49,10 +49,8 @@
       "preload.cjs",
       "dist/**/*",
       "public/**/*",
+      "backend/**/*",
       "!node_modules/**"
-    ],
-    "extraResources": [
-      "backend/**/*"
     ],
     "asar": false,
     "mac": {

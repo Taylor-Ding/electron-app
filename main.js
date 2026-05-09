@@ -45,13 +45,9 @@ ipcMain.handle('run-node-check', async (event, requestPayload) => {
     throw new Error('Invalid request payload');
   }
 
-  let resourcesPath;
-  if (app.isPackaged) {
-    resourcesPath = process.resourcesPath;
-  } else {
-    resourcesPath = __dirname;
-  }
-  const configPath = path.join(resourcesPath, 'backend', 'config', 'config.json');
+  // backend 已随 main.js 打包到同目录（resources/app/backend/）
+  // __dirname 在打包和开发环境下均指向 main.js 所在目录，路径统一
+  const configPath = path.join(__dirname, 'backend', 'config', 'config.json');
   const checker = new DataConsistencyChecker(configPath);
   let normalizedPayload = { ...requestPayload };
 
