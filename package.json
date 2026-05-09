@@ -49,8 +49,7 @@
       "preload.cjs",
       "dist/**/*",
       "public/**/*",
-      "backend/**/*",
-      "!node_modules/**"
+      "backend/**/*"
     ],
     "asar": false,
     "mac": {
