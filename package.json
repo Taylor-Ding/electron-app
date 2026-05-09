@@ -52,8 +52,7 @@
       "!node_modules/**"
     ],
     "extraResources": [
-      "backend/**/*",
-      ".venv/**/*"
+      "backend/**/*"
     ],
     "asar": false,
     "mac": {

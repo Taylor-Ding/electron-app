@@ -26,26 +26,8 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install Node.js dependencies
+      - name: Install dependencies
         run: npm ci
-
-      - name: Create Python virtual environment and install dependencies
-        shell: bash
-        run: |
-          python -m venv .venv
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            source .venv/Scripts/activate
-          else
-            source .venv/bin/activate
-          fi
-          pip install -r backend/requirements.txt
-          deactivate
 
       - name: Build frontend
         run: npm run build
