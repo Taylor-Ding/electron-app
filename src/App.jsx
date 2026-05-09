@@ -1,9 +1,33 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback, startTransition } from 'react';
 import axios from 'axios';
 import './App.css';
+import LoginScreen from './components/LoginScreen.jsx';
 
 function App() {
-  const [apiUrl, setApiUrl] = useState('http://localhost:8080/api/business');
+  const electronAPI = typeof window !== 'undefined' ? window.electronAPI : null;
+  const [authUser, setAuthUser] = useState(() => {
+    if (typeof window === 'undefined') return null;
+    const saved =
+      window.sessionStorage.getItem('authSession') || window.sessionStorage.getItem('mockAuthUser');
+    if (!saved) return null;
+    try {
+      return JSON.parse(saved);
+    } catch {
+      return null;
+    }
+  });
+  const [loginError, setLoginError] = useState('');
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [authApiBaseUrl, setAuthApiBaseUrl] = useState(() => {
+    if (typeof window === 'undefined') return 'http://localhost:8080/prod-api';
+    return localStorage.getItem('authApiBaseUrl') || 'http://localhost:8080/prod-api';
+  });
+  const [captchaSrc, setCaptchaSrc] = useState('');
+  const [captchaUuid, setCaptchaUuid] = useState('');
+  const [captchaLoading, setCaptchaLoading] = useState(false);
+  const [captchaEnabled, setCaptchaEnabled] = useState(true);
+  const [loginCaptchaCode, setLoginCaptchaCode] = useState('');
+  const [apiUrl, setApiUrl] = useState('http://localhost:8080/online-service');
   const [requestBody, setRequestBody] = useState(JSON.stringify({
     "txBody": {
       "txEntity": {
@@ -63,11 +87,17 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [activeTab, setActiveTab] = useState('log');
   const [selectedEnvironment, setSelectedEnvironment] = useState('DEV1');
+  const [showDataModal, setShowDataModal] = useState(false);
+  const [dataModalContent, setDataModalContent] = useState({ title: '', beforeSql: '', afterSql: '', beforeData: [], afterData: [] });
   const [showEnvironmentDropdown, setShowEnvironmentDropdown] = useState(false);
   const [showSettingsDropdown, setShowSettingsDropdown] = useState(false);
   const [showApiSettings, setShowApiSettings] = useState(false);
   const [showDbSettings, setShowDbSettings] = useState(false);
   const [showSystemSettings, setShowSystemSettings] = useState(false);
+  const [showDefaultTableSettings, setShowDefaultTableSettings] = useState(false);
+  const [tableSearchQuery, setTableSearchQuery] = useState('');
+  const [defaultTableSearchQuery, setDefaultTableSearchQuery] = useState('');
+  const [defaultTableSettings, setDefaultTableSettings] = useState({ tables: {} });
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('themeMode');
     return saved !== null ? saved === 'dark' : true;
@@ -79,6 +109,9 @@ function App() {
   const settingsDropdownRef = useRef(null);
   const importFileRef = useRef(null);
   const jmxFileRef = useRef(null);
+  // 用于在异步函数中访问最新 state
+  const systemDbConfigRef = useRef(null);
+  const apiSettingsRef = useRef(null);
   
   // API设置 - 不同环境的请求地址配置
   const [apiSettings, setApiSettings] = useState({
@@ -160,6 +193,10 @@ function App() {
   // 数据库连接测试状态
   const [testConnectionStatus, setTestConnectionStatus] = useState({});
 
+  // API 状态指示器: 'idle' | 'loading' | 'success' | 'error'
+  const [apiStatus, setApiStatus] = useState('idle');
+  const [apiStatusMsg, setApiStatusMsg] = useState('就绪');
+
   const addTable = () => {
     setTables([...tables, { name: '' }]);
   };
@@ -176,14 +213,218 @@ function App() {
     setTables(newTables);
   };
 
+  const logIdRef = useRef(0);
   const addLog = (message, level = 'INFO') => {
     const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    setLogs(prev => [...prev, { timestamp, message, level }]);
+    const id = ++logIdRef.current;
+    setLogs(prev => [...prev, { id, timestamp, message, level }]);
     setTimeout(() => {
       if (logsRef.current) {
         logsRef.current.scrollTop = logsRef.current.scrollHeight;
       }
     }, 50);
+  };
+
+  const normalizeAuthPayload = (data) => {
+    if (!data || typeof data !== 'object') return {};
+    const nested = data.data && typeof data.data === 'object' && !Array.isArray(data.data) ? data.data : {};
+    return { ...data, ...nested };
+  };
+
+  const fetchCaptcha = useCallback(async () => {
+    const base = authApiBaseUrl.trim().replace(/\/$/, '');
+    if (!base) {
+      setCaptchaSrc('');
+      setCaptchaUuid('');
+      return;
+    }
+    setCaptchaLoading(true);
+    setLoginError('');
+    setLoginCaptchaCode('');
+    try {
+      const { data } = await axios.get(`${base}/captchaImage`, { timeout: 20000 });
+      const p = normalizeAuthPayload(data);
+      const enabled = p.captchaEnabled !== false;
+      setCaptchaEnabled(enabled);
+      if (!enabled) {
+        setCaptchaUuid('');
+        setCaptchaSrc('');
+        return;
+      }
+      const uuid = p.uuid;
+      const img = p.img;
+      if (!uuid || img == null || String(img) === '') {
+        throw new Error('验证码接口返回缺少 uuid 或 img');
+      }
+      const raw = String(img);
+      const src = raw.startsWith('data:') ? raw : `data:image/png;base64,${raw}`;
+      setCaptchaUuid(uuid);
+      setCaptchaSrc(src);
+    } catch (e) {
+      setCaptchaEnabled(true);
+      setCaptchaSrc('');
+      setCaptchaUuid('');
+      const msg = e.response?.data?.msg || e.message || '获取验证码失败';
+      setLoginError(String(msg));
+    } finally {
+      setCaptchaLoading(false);
+    }
+  }, [authApiBaseUrl]);
+
+  useEffect(() => {
+    localStorage.setItem('authApiBaseUrl', authApiBaseUrl);
+  }, [authApiBaseUrl]);
+
+  useEffect(() => {
+    if (authUser) return;
+    const t = window.setTimeout(() => {
+      fetchCaptcha();
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [authUser, authApiBaseUrl, fetchCaptcha]);
+
+  const handleLogin = async ({ username, password, code, uuid }) => {
+    setLoginError('');
+    if (!username || !password) {
+      setLoginError('请输入用户名和密码');
+      return;
+    }
+    if (captchaEnabled && !code?.trim()) {
+      setLoginError('请输入验证码');
+      return;
+    }
+    if (captchaEnabled && !uuid) {
+      setLoginError('验证码未就绪，请稍后或点击图片刷新');
+      await fetchCaptcha();
+      return;
+    }
+
+    const base = authApiBaseUrl.trim().replace(/\/$/, '');
+    if (!base) {
+      setLoginError('请填写认证服务根地址');
+      return;
+    }
+
+    setIsAuthenticating(true);
+    try {
+      const { data } = await axios.post(
+        `${base}/login`,
+        {
+          username,
+          password,
+          code: captchaEnabled ? code : '',
+          uuid: captchaEnabled ? uuid : ''
+        },
+        {
+          timeout: 30000,
+          headers: { 'Content-Type': 'application/json' }
+        }
+      );
+
+      const p = normalizeAuthPayload(data);
+      if (p.code !== 200) {
+        setLoginError(p.msg || '登录失败');
+        await fetchCaptcha();
+        return;
+      }
+
+      const token = p.token ?? p.access_token;
+      const refreshToken = p.refresh_token ?? p.refreshToken;
+      if (!token) {
+        setLoginError('登录成功但未返回访问令牌');
+        await fetchCaptcha();
+        return;
+      }
+
+      const user = {
+        username,
+        displayName: username,
+        token,
+        refreshToken: refreshToken || ''
+      };
+      setAuthUser(user);
+      window.sessionStorage.setItem('authSession', JSON.stringify(user));
+      window.sessionStorage.removeItem('mockAuthUser');
+      // 登录成功后立即从系统数据库拉取 API 地址配置
+      fetchApiSettingsFromDb();
+    } catch (e) {
+      const body = e.response?.data;
+      const p = normalizeAuthPayload(body);
+      const msg = p.msg || body?.message || e.message || '登录失败';
+      setLoginError(String(msg));
+      await fetchCaptcha();
+    } finally {
+      setIsAuthenticating(false);
+    }
+  };
+
+  const handleLogout = () => {
+    setAuthUser(null);
+    setLoginError('');
+    setApiStatus('idle');
+    setApiStatusMsg('就绪');
+    window.sessionStorage.removeItem('mockAuthUser');
+    window.sessionStorage.removeItem('authSession');
+    setShowEnvironmentDropdown(false);
+    setShowSettingsDropdown(false);
+    setShowApiSettings(false);
+    setShowDbSettings(false);
+    setShowSystemSettings(false);
+    setShowDefaultTableSettings(false);
+  };
+
+  /** 登录后从系统数据库自动拉取 API 地址配置 */
+  const fetchApiSettingsFromDb = async () => {
+    const latestDbConfig = systemDbConfigRef.current;
+    if (!latestDbConfig?.host) {
+      setApiStatus('error');
+      setApiStatusMsg('未配置系统数据源，请先在「数据库配置」中添加系统数据源');
+      return;
+    }
+    setApiStatus('loading');
+    setApiStatusMsg('正在加载 API 地址...');
+    try {
+      const sql = 'SELECT tenant_id, gate_address, mac_address FROM tb_ts_request_gate';
+      let rows;
+      if (electronAPI?.querySystemDb) {
+        const result = await electronAPI.querySystemDb({
+          dbConfig: latestDbConfig,
+          sql,
+          values: []
+        });
+        rows = result.rows;
+      } else {
+        setApiStatus('error');
+        setApiStatusMsg('非 Electron 环境，无法查询数据库');
+        return;
+      }
+
+      if (!rows || rows.length === 0) {
+        setApiStatus('error');
+        setApiStatusMsg('获取 API 地址失败：表中无数据，请检查数据库配置');
+        return;
+      }
+
+      const patch = {};
+      for (const row of rows) {
+        const env = String(row.tenant_id || '').trim();
+        if (!env) continue;
+        patch[env] = {
+          request_url: row.gate_address || '',
+          mac_url: row.mac_address || ''
+        };
+      }
+      const merged = { ...(apiSettingsRef.current || {}), ...patch };
+      setApiSettings(merged);
+      localStorage.setItem('apiSettings', JSON.stringify(merged));
+
+      setApiStatus('success');
+      setApiStatusMsg('就绪');
+    } catch (err) {
+      console.error('[fetchApiSettingsFromDb] error:', err);
+      setApiStatus('error');
+      setApiStatusMsg(`获取 API 地址失败：${err.message}`);
+    }
   };
 
   const parseMainMapElement = (requestData) => {
@@ -244,10 +485,15 @@ function App() {
 
   const extractConditions = async (requestData, tableName, routingKey, tableResults = {}) => {
     addLog(`提取表 ${tableName} 的查询条件...`);
-    const config = systemSettings.tables[tableName];
+    let config = systemSettings.tables[tableName];
     if (!config) {
-      addLog(`警告: 表 ${tableName} 没有配置查询条件`, 'WARN');
-      return {};
+      config = defaultTableSettings.tables[tableName];
+      if (config) {
+        addLog(`提示: 表 ${tableName} 未自定义规则，使用默认配置规则`);
+      } else {
+        addLog(`警告: 表 ${tableName} 没有配置查询条件，也没有默认配置`, 'WARN');
+        return {};
+      }
     }
 
     addLog(`  主键: ${config.primaryKey}`);
@@ -266,7 +512,7 @@ function App() {
           }
           break;
         case 'route':
-          if (condition.field === 'cust_no') {
+          if (condition.field === 'cust_no' || condition.field === 'zone_val') {
             let mediumNoToQuery = null;
             if (condition.path) {
               mediumNoToQuery = extractValue(requestData, condition.path);
@@ -300,20 +546,32 @@ function App() {
                 if (respData && respData.code === 200 && respData.data) {
                   try {
                     const parsedData = typeof respData.data === 'string' ? JSON.parse(respData.data) : respData.data;
-                    value = parsedData.custNo || parsedData.cust_no;
+                    if (condition.field === 'cust_no') {
+                      value = parsedData.custNo !== undefined ? parsedData.custNo : parsedData.cust_no;
+                    } else if (condition.field === 'zone_val') {
+                      value = parsedData.zoneVal !== undefined ? parsedData.zoneVal : (parsedData.zone_val !== undefined ? parsedData.zone_val : (parsedData.custNo !== undefined ? parsedData.custNo : parsedData.cust_no));
+                    }
                   } catch (e) {
                     addLog(`  警告: 尝试解析 data 字段为 JSON 失败: ${e.message}`, 'WARN');
                   }
                 }
 
-                if (!value) {
-                  value = respData?.custNo || respData?.cust_no;
+                if (value === undefined || value === null) {
+                  if (condition.field === 'cust_no') {
+                    value = respData?.custNo !== undefined ? respData?.custNo : respData?.cust_no;
+                  } else if (condition.field === 'zone_val') {
+                    value = respData?.zoneVal !== undefined ? respData?.zoneVal : (respData?.zone_val !== undefined ? respData?.zone_val : (respData?.custNo !== undefined ? respData?.custNo : respData?.cust_no));
+                  }
+                }
+
+                if (value !== undefined && value !== null) {
+                  value = String(value);
                 }
 
                 if (!value || typeof value !== 'string') {
-                  throw new Error(`路由查询返回数据异常或无法提取客户号: ${JSON.stringify(routeResponse.data)}`);
+                  throw new Error(`路由查询返回数据异常或无法提取 ${condition.field}: ${JSON.stringify(routeResponse.data)}`);
                 }
-                addLog(`  从路由查询获取 cust_no: ${value}`);
+                addLog(`  从路由查询获取 ${condition.field}: ${value}`);
               } catch (error) {
                 addLog(`  错误: 路由查询失败: ${error.message}`, 'ERROR');
               }
@@ -329,8 +587,7 @@ function App() {
             }
           }
           break;
-        case 'table':
-          // 处理表依赖，格式: tableName.field
+        case 'table': {
           const [depTable, depField] = condition.path.split('.');
           if (depTable && depField && tableResults[depTable]) {
             value = extractValue(tableResults[depTable], depField);
@@ -343,6 +600,7 @@ function App() {
             addLog(`  警告: 依赖表 ${depTable} 不存在或未查询`, 'WARN');
           }
           break;
+        }
       }
 
       if (value !== null && value !== undefined) {
@@ -369,10 +627,9 @@ function App() {
     setActiveTab('log');
 
     // 每次执行前，主动将最新 tableSettings 同步给主进程（兜底机制）
-    if (window && window.require) {
+    if (electronAPI) {
       try {
-        const { ipcRenderer } = window.require('electron');
-        await ipcRenderer.invoke('save-table-settings', systemSettings.tables);
+        await electronAPI.saveTableSettings({ ...defaultTableSettings.tables, ...systemSettings.tables });
       } catch (e) {
         console.warn('[renderer] pre-sync tableSettings failed:', e);
       }
@@ -458,32 +715,31 @@ function App() {
         addLog(`tenantId已设置为: ${requestData.txHeader.tenantId}`);
       }
 
-      // 调用mac_url获取msgrptMac值
-      addLog('调用mac_url获取msgrptMac值...');
+      // 调用mac_url获取msgrptMac值（若mac_url为空则跳过）
       const macUrl = apiSettings[selectedEnvironment]?.mac_url;
       if (!macUrl) {
-        addLog('错误: 当前环境的mac_url未配置', 'ERROR');
-        throw new Error('当前环境的mac_url未配置');
-      }
+        addLog('mac_url未配置或为空，跳过MAC获取步骤', 'INFO');
+      } else {
+        addLog('调用mac_url获取msgrptMac值...');
+        addLog(`mac_url地址: ${macUrl}`);
+        try {
+          const macResponse = await axios.post(macUrl, requestData);
+          const msgrptMac = macResponse.data;
 
-      addLog(`mac_url地址: ${macUrl}`);
-      try {
-        const macResponse = await axios.post(macUrl, requestData);
-        const msgrptMac = macResponse.data;
-        
-        if (!msgrptMac || typeof msgrptMac !== 'string') {
-          addLog('错误: mac_url返回的值不是有效字符串', 'ERROR');
-          throw new Error('mac_url返回的值不是有效字符串');
-        }
+          if (!msgrptMac || typeof msgrptMac !== 'string') {
+            addLog('错误: mac_url返回的值不是有效字符串', 'ERROR');
+            throw new Error('mac_url返回的值不是有效字符串');
+          }
 
-        // 替换msgrptMac字段
-        if (requestData.txHeader) {
-          requestData.txHeader.msgrptMac = msgrptMac;
-          addLog(`msgrptMac替换成功: ${msgrptMac}`);
+          // 替换msgrptMac字段
+          if (requestData.txHeader) {
+            requestData.txHeader.msgrptMac = msgrptMac;
+            addLog(`msgrptMac替换成功: ${msgrptMac}`);
+          }
+        } catch (macError) {
+          addLog(`错误: mac_url请求失败: ${macError.message}`, 'ERROR');
+          throw new Error(`mac_url请求失败: ${macError.message}`);
         }
-      } catch (macError) {
-        addLog(`错误: mac_url请求失败: ${macError.message}`, 'ERROR');
-        throw new Error(`mac_url请求失败: ${macError.message}`);
       }
 
       let routingKey = null;
@@ -502,11 +758,14 @@ function App() {
       for (const table of tables) {
         if (table.name) {
           try {
-            const config = systemSettings.tables[table.name];
+            let config = systemSettings.tables[table.name];
             if (!config) {
-              addLog(`警告: 表 ${table.name} 没有配置查询条件`, 'WARN');
-              tableConditions[table.name] = {};
-              continue;
+              config = defaultTableSettings.tables[table.name];
+              if (!config) {
+                addLog(`警告: 表 ${table.name} 没有配置查询条件，也没有默认配置`, 'WARN');
+                tableConditions[table.name] = {};
+                continue;
+              }
             }
             const conditions = {};
             for (const cond of config.conditionFields) {
@@ -520,7 +779,7 @@ function App() {
                 value = extractValue(requestData, cond.path);
                 if (value) addLog(`  从请求报文提取 ${cond.field}: ${value}`);
               } else if (cond.source === 'route') {
-                if (cond.field === 'cust_no') {
+                if (cond.field === 'cust_no' || cond.field === 'zone_val') {
                   let mediumNoToQuery = null;
                   if (cond.path) {
                     mediumNoToQuery = extractValue(requestData, cond.path);
@@ -547,14 +806,30 @@ function App() {
                       if (respData && respData.code === 200 && respData.data) {
                         try {
                           const parsedData = typeof respData.data === 'string' ? JSON.parse(respData.data) : respData.data;
-                          value = parsedData.custNo || parsedData.cust_no;
+                          if (cond.field === 'cust_no') {
+                            value = parsedData.custNo !== undefined ? parsedData.custNo : parsedData.cust_no;
+                          } else if (cond.field === 'zone_val') {
+                            value = parsedData.zoneVal !== undefined ? parsedData.zoneVal : (parsedData.zone_val !== undefined ? parsedData.zone_val : (parsedData.custNo !== undefined ? parsedData.custNo : parsedData.cust_no));
+                          }
                         } catch (e) {
                           addLog(`  警告: 尝试解析data字段为JSON失败: ${e.message}`, 'WARN');
                         }
                       }
-                      if (!value) value = respData?.custNo || respData?.cust_no;
-                      if (!value || typeof value !== 'string') throw new Error(`路由查询返回数据异常: ${JSON.stringify(routeResponse.data)}`);
-                      addLog(`  从路由查询获取 cust_no: ${value}`);
+                      
+                      if (value === undefined || value === null) {
+                        if (cond.field === 'cust_no') {
+                          value = respData?.custNo !== undefined ? respData?.custNo : respData?.cust_no;
+                        } else if (cond.field === 'zone_val') {
+                          value = respData?.zoneVal !== undefined ? respData?.zoneVal : (respData?.zone_val !== undefined ? respData?.zone_val : (respData?.custNo !== undefined ? respData?.custNo : respData?.cust_no));
+                        }
+                      }
+
+                      if (value !== undefined && value !== null) {
+                        value = String(value);
+                      }
+
+                      if (!value || typeof value !== 'string') throw new Error(`路由查询返回数据异常或无法提取 ${cond.field}: ${JSON.stringify(routeResponse.data)}`);
+                      addLog(`  从路由查询获取 ${cond.field}: ${value}`);
                     } catch (error) {
                       addLog(`  错误: 路由查询失败: ${error.message}`, 'ERROR');
                     }
@@ -612,17 +887,17 @@ function App() {
           routingKey: routingKey,
           tableConditions: tableConditions,
           // 传入表配置，让后端能处理跨表依赖条件（source=table）
-          tableSettings: systemSettings.tables,
-          environment: selectedEnvironment
+          tableSettings: { ...defaultTableSettings.tables, ...systemSettings.tables },
+          environment: selectedEnvironment,
+          dbSettings: dbSettings
         };
 
         let checkData;
 
-        if (window && window.require) {
-          addLog('检测到 Electron 桌面环境，通过主进程启动本地 Node.js 检查...', 'INFO');
+        if (electronAPI) {
+          addLog('检测到 桌面环境，通过主进程启动本地 Node.js 检查...', 'INFO');
           try {
-            const { ipcRenderer } = window.require('electron');
-            checkData = await ipcRenderer.invoke('run-node-check', requestPayload);
+            checkData = await electronAPI.runNodeCheck(requestPayload);
           } catch (err) {
             addLog(`主进程 Node.js 调用失败: ${err.message}`, 'ERROR');
             throw err;
@@ -639,13 +914,18 @@ function App() {
           addLog(log.message, log.level || 'INFO');
         }
 
+        // 后端执行失败时，日志已输出，直接中断，不跳转标签页
+        if (!checkData?.success) {
+          throw new Error(checkData?.error || '后端执行失败，请查看执行日志');
+        }
+
         const backendResults = (checkData?.results || []).map(result => ({
           table: result.table,
           status: result.status === '通过' ? '通过' : result.status === '失败' ? '失败' : '错误',
           message: result.message,
           details: {
-            before: { count: result.before?.count || 0, sql: result.before?.sql || '' },
-            after: { count: result.after?.count || 0, sql: result.after?.sql || '' }
+            before: { count: result.before?.count || 0, sql: result.before?.sql || '', data: result.before?.data || [] },
+            after: { count: result.after?.count || 0, sql: result.after?.sql || '', data: result.after?.data || [] }
           }
         }));
 
@@ -653,7 +933,7 @@ function App() {
         addLog('断言结果已生成');
         setTimeout(() => setActiveTab('result'), 800);
       } catch (err) {
-        addLog(`本地 Python 执行失败: ${err.message}`, 'ERROR');
+        addLog(`数据库连接失败: ${err.message}`, 'ERROR');
         throw err;
       }
     } catch (err) {
@@ -663,6 +943,67 @@ function App() {
       setIsLoading(false);
       addLog('执行完成');
     }
+  };
+
+  const handleSqlClick = (tableName, details) => {
+    if (!details) return;
+    setDataModalContent({
+      title: tableName,
+      beforeSql: details.before?.sql || 'N/A',
+      afterSql: details.after?.sql || 'N/A',
+      beforeData: details.before?.data || [],
+      afterData: details.after?.data || []
+    });
+    setShowDataModal(true);
+  };
+
+  const renderDataComparisonTable = () => {
+    const { beforeData, afterData } = dataModalContent;
+    const allKeys = new Set();
+    const maxLen = Math.max(beforeData.length, afterData.length);
+    if (maxLen === 0) return null;
+
+    if (beforeData[0]) Object.keys(beforeData[0]).forEach(k => allKeys.add(k));
+    if (afterData[0]) Object.keys(afterData[0]).forEach(k => allKeys.add(k));
+    
+    const fields = Array.from(allKeys);
+
+    return (
+      <div className="data-table-container" style={{ overflowX: 'auto', marginTop: '15px' }}>
+        {Array.from({ length: maxLen }).map((_, idx) => (
+          <div key={idx} style={{ marginBottom: '20px' }}>
+            {maxLen > 1 && <h4 style={{ marginBottom: '10px', color: 'var(--text-primary)' }}>记录 {idx + 1}</h4>}
+            <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+              <thead>
+                <tr>
+                  <th style={{ padding: '10px 12px', borderBottom: '2px solid var(--border-color)', backgroundColor: 'var(--bg-lighter)', textAlign: 'left', whiteSpace: 'nowrap', color: 'var(--text-secondary)', width: '20%' }}>字段名称</th>
+                  <th style={{ padding: '10px 12px', borderBottom: '2px solid var(--border-color)', backgroundColor: 'var(--bg-lighter)', textAlign: 'left', whiteSpace: 'nowrap', color: 'var(--text-secondary)', width: '40%' }}>执行前数据</th>
+                  <th style={{ padding: '10px 12px', borderBottom: '2px solid var(--border-color)', backgroundColor: 'var(--bg-lighter)', textAlign: 'left', whiteSpace: 'nowrap', color: 'var(--text-secondary)', width: '40%' }}>执行后数据</th>
+                </tr>
+              </thead>
+              <tbody>
+                {fields.map(field => {
+                  const bVal = beforeData[idx] ? beforeData[idx][field] : undefined;
+                  const aVal = afterData[idx] ? afterData[idx][field] : undefined;
+                  const isDiff = bVal !== aVal;
+                  return (
+                    <tr key={field} style={{ borderBottom: '1px solid var(--border-color)', backgroundColor: isDiff ? 'rgba(255, 100, 100, 0.05)' : 'transparent' }}>
+                      <td style={{ padding: '10px 12px', fontWeight: '500', color: 'var(--text-primary)' }}>{field}</td>
+                      <td style={{ padding: '10px 12px', wordBreak: 'break-all', color: isDiff ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+                        {bVal === undefined ? '-' : bVal === null ? <span style={{ color: '#aaa', fontStyle: 'italic' }}>NULL</span> : String(bVal)}
+                      </td>
+                      <td style={{ padding: '10px 12px', wordBreak: 'break-all', color: isDiff ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+                        {aVal === undefined ? '-' : aVal === null ? <span style={{ color: '#aaa', fontStyle: 'italic' }}>NULL</span> : String(aVal)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ))}
+      </div>
+    );
   };
 
   const getLogClass = (level) => {
@@ -684,6 +1025,9 @@ function App() {
 
   const handleEnvironmentSelect = (env) => {
     setSelectedEnvironment(env);
+    if (apiSettings[env]) {
+      setApiUrl(apiSettings[env].request_url);
+    }
     setShowEnvironmentDropdown(false);
   };
 
@@ -706,6 +1050,11 @@ function App() {
     setShowSystemSettings(true);
   };
 
+  const handleDefaultTableSettingsClick = () => {
+    setShowSettingsDropdown(false);
+    setShowDefaultTableSettings(true);
+  };
+
   const handleApiSettingChange = (env, field, value) => {
     setApiSettings(prev => ({
       ...prev,
@@ -718,31 +1067,35 @@ function App() {
 
   const handleDbSettingChange = (env, index, field, value) => {
     setDbSettings(prev => {
-      const newSettings = { ...prev };
-      if (newSettings[env] && newSettings[env][index]) {
-        newSettings[env][index] = {
-          ...newSettings[env][index],
+      const envArray = prev[env] ? [...prev[env]] : [];
+      if (envArray[index]) {
+        envArray[index] = {
+          ...envArray[index],
           [field]: value
         };
       }
-      return newSettings;
+      return {
+        ...prev,
+        [env]: envArray
+      };
     });
   };
 
   const addDataSource = (env) => {
     setDbSettings(prev => {
-      const newSettings = { ...prev };
-      if (!newSettings[env]) {
-        newSettings[env] = [];
-      }
-      newSettings[env].push({
+      const envArray = prev[env] ? [...prev[env]] : [];
+      envArray.push({
+        dus: 'bdus',
         host: '',
         port: 5432,
         database: '',
         user: '',
         password: ''
       });
-      return newSettings;
+      return {
+        ...prev,
+        [env]: envArray
+      };
     });
   };
 
@@ -843,10 +1196,9 @@ function App() {
     // 保存系统配置到本地存储
     localStorage.setItem('systemSettings', JSON.stringify(systemSettings));
     // 同步 tableSettings 给主进程缓存，作为兜底
-    if (window && window.require) {
+    if (electronAPI) {
       try {
-        const { ipcRenderer } = window.require('electron');
-        ipcRenderer.invoke('save-table-settings', systemSettings.tables)
+        electronAPI.saveTableSettings(systemSettings.tables)
           .catch(e => console.warn('[renderer] save-table-settings failed:', e));
       } catch (e) {
         console.warn('[renderer] ipc not available:', e);
@@ -856,28 +1208,35 @@ function App() {
     addLog('系统配置保存成功');
   };
 
+  const handleSaveDefaultTableSettings = () => {
+    localStorage.setItem('defaultTableSettings', JSON.stringify(defaultTableSettings));
+    if (electronAPI) {
+      try {
+        const mergedTables = { ...defaultTableSettings.tables, ...systemSettings.tables };
+        electronAPI.saveTableSettings(mergedTables)
+          .catch(e => console.warn('[renderer] save-table-settings failed:', e));
+      } catch (e) {
+        console.warn('[renderer] ipc not available:', e);
+      }
+    }
+    setShowDefaultTableSettings(false);
+    addLog('默认表配置保存成功');
+  };
+
   // ===== TOML 序列化/反序列化工具 =====
 
-  // 密码加密用的应用固定密鑰（AES-128-CBC，16字节）
-  const CIPHER_KEY = 'AutoTest-CfgKey!'; // 16 chars
   const ENC_PREFIX = 'ENC:';
 
   /**
    * 加密密码字段 → 返回 "ENC:<base64>"
-   * Electron 环境下使用 Node.js crypto（AES-128-CBC + 随机 IV）
+   * Electron 环境下通过 preload 桥接使用 Node.js crypto（AES-128-CBC + 随机 IV）
    * 浏览器环境 fallback：简单 base64 混淆
    */
   const encryptPassword = (plaintext) => {
     if (!plaintext) return plaintext;
     try {
-      if (window && window.require) {
-        const crypto = window.require('crypto');
-        const key = Buffer.from(CIPHER_KEY, 'utf8'); // 16 bytes
-        const iv = crypto.randomBytes(16);
-        const cipher = crypto.createCipheriv('aes-128-cbc', key, iv);
-        const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-        const combined = Buffer.concat([iv, encrypted]);
-        return ENC_PREFIX + combined.toString('base64');
+      if (electronAPI?.encryptText) {
+        return ENC_PREFIX + electronAPI.encryptText(plaintext);
       }
       // 浏览器失能 fallback：简单 base64
       return ENC_PREFIX + btoa(unescape(encodeURIComponent(plaintext)));
@@ -896,14 +1255,8 @@ function App() {
     if (!value || !String(value).startsWith(ENC_PREFIX)) return value;
     const encoded = String(value).slice(ENC_PREFIX.length);
     try {
-      if (window && window.require) {
-        const crypto = window.require('crypto');
-        const key = Buffer.from(CIPHER_KEY, 'utf8');
-        const combined = Buffer.from(encoded, 'base64');
-        const iv = combined.slice(0, 16);
-        const ciphertext = combined.slice(16);
-        const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
-        return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+      if (electronAPI?.decryptText) {
+        return electronAPI.decryptText(encoded);
       }
       // 浏览器 fallback
       return decodeURIComponent(escape(atob(encoded)));
@@ -917,7 +1270,7 @@ function App() {
    * 将配置对象序列化为 TOML 字符串（带注释）
    * 覆盖：systemSettings、apiSettings、dbSettings、systemDbConfig
    */
-  const serializeToToml = (sysSettings, apiCfg, dbCfg, sysDbCfg) => {
+  const serializeToToml = (sysSettings, defaultTabSettings, apiCfg, dbCfg, sysDbCfg) => {
     const lines = [];
     const ts = new Date().toISOString();
 
@@ -972,6 +1325,7 @@ function App() {
         sources.forEach((ds, i) => {
           lines.push(`[[db.${env}]]`);
           lines.push(`# 数据源 ${i + 1}`);
+          lines.push(`dus      = ${JSON.stringify(ds.dus || 'bdus')}`);
           lines.push(`host     = ${JSON.stringify(ds.host || '')}`);
           lines.push(`port     = ${Number(ds.port) || 5432}`);
           lines.push(`database = ${JSON.stringify(ds.database || '')}`);
@@ -993,11 +1347,43 @@ function App() {
     for (const [tableName, cfg] of Object.entries(tables)) {
       if (!cfg || typeof cfg !== 'object') continue;
       lines.push(`[tables.${tableName}]`);
+      if (cfg.chineseName) { lines.push(`chinese_name = ${JSON.stringify(cfg.chineseName)}`); }
       lines.push(`primary_key = ${JSON.stringify(cfg.primaryKey || '')}`);
+      lines.push(`dus         = ${JSON.stringify(cfg.dus || 'bdus')}`);
       lines.push('');
       const conds = Array.isArray(cfg.conditionFields) ? cfg.conditionFields : [];
       conds.forEach((cond, i) => {
         lines.push(`[[tables.${tableName}.conditions]]`);
+        lines.push(`# 条件 ${i + 1}`);
+        lines.push(`field    = ${JSON.stringify(cond.field || '')}`);
+        lines.push(`source   = ${JSON.stringify(cond.source || 'request')}`);
+        lines.push(`path     = ${JSON.stringify(cond.path || '')}`);
+        lines.push(`required = ${cond.required ? 'true' : 'false'}`);
+        if (cond.selectedTable) {
+          lines.push(`selected_table = ${JSON.stringify(cond.selectedTable)}`);
+        }
+        lines.push('');
+      });
+    }
+
+    // ── 5. 默认表配置（未自定义规则时作为兜底）────────────────────────────
+    lines.push('');
+    lines.push('# ╔══════════════════════════════════════════╗');
+    lines.push('# ║   默认表配置（未自定义规则时作为兜底）     ║');
+    lines.push('# ╚══════════════════════════════════════════╝');
+    lines.push('');
+
+    const defaultTables = defaultTabSettings.tables || {};
+    for (const [tableName, cfg] of Object.entries(defaultTables)) {
+      if (!cfg || typeof cfg !== 'object') continue;
+      lines.push(`[default_tables.${tableName}]`);
+      if (cfg.chineseName) { lines.push(`chinese_name = ${JSON.stringify(cfg.chineseName)}`); }
+      lines.push(`primary_key = ${JSON.stringify(cfg.primaryKey || '')}`);
+      lines.push(`dus         = ${JSON.stringify(cfg.dus || 'bdus')}`);
+      lines.push('');
+      const conds = Array.isArray(cfg.conditionFields) ? cfg.conditionFields : [];
+      conds.forEach((cond, i) => {
+        lines.push(`[[default_tables.${tableName}.conditions]]`);
         lines.push(`# 条件 ${i + 1}`);
         lines.push(`field    = ${JSON.stringify(cond.field || '')}`);
         lines.push(`source   = ${JSON.stringify(cond.source || 'request')}`);
@@ -1165,6 +1551,7 @@ function App() {
         const arr = result.db?.[env];
         if (Array.isArray(arr)) {
           newDbSettings[env] = arr.map(ds => ({
+            dus: ds.dus || 'bdus',
             host: ds.host || '',
             port: Number(ds.port) || 5432,
             database: ds.database || '',
@@ -1182,7 +1569,9 @@ function App() {
         if (!tCfg || typeof tCfg !== 'object') continue;
         const conds = Array.isArray(tCfg.conditions) ? tCfg.conditions : [];
         newSystemSettings.tables[tName] = {
+          chineseName: tCfg.chinese_name || '',
           primaryKey: tCfg.primary_key || '',
+          dus: tCfg.dus || 'bdus',
           conditionFields: conds.map(c => ({
             field: c.field || '',
             source: c.source || 'request',
@@ -1193,7 +1582,26 @@ function App() {
         };
       }
 
-      return { newApiSettings, newDbSettings, newSystemDbConfig, newSystemSettings };
+      const rawDefaultTables = result.default_tables || {};
+      const newDefaultTableSettings = { tables: {} };
+      for (const [tName, tCfg] of Object.entries(rawDefaultTables)) {
+        if (!tCfg || typeof tCfg !== 'object') continue;
+        const conds = Array.isArray(tCfg.conditions) ? tCfg.conditions : [];
+        newDefaultTableSettings.tables[tName] = {
+          chineseName: tCfg.chinese_name || '',
+          primaryKey: tCfg.primary_key || '',
+          dus: tCfg.dus || 'bdus',
+          conditionFields: conds.map(c => ({
+            field: c.field || '',
+            source: c.source || 'request',
+            path: c.path || '',
+            required: Boolean(c.required),
+            ...(c.selected_table ? { selectedTable: c.selected_table } : {})
+          }))
+        };
+      }
+
+      return { newApiSettings, newDbSettings, newSystemDbConfig, newSystemSettings, newDefaultTableSettings };
     } catch (err) {
       console.error('[parseToml] 解析失败:', err);
       return null;
@@ -1201,17 +1609,17 @@ function App() {
   };
 
   /** 导出当前全部配置为 TOML 文件 */
-  const handleExportSettings = async () => {
+  const handleExportSettings = async (isDefault = false) => {
     try {
-      const tomlContent = serializeToToml(systemSettings, apiSettings, dbSettings, systemDbConfig);
+      const tomlContent = serializeToToml(systemSettings, defaultTableSettings, apiSettings, dbSettings, systemDbConfig);
       const now = new Date();
       const stamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
-      const filename = `autotest_config_${stamp}.toml`;
+      const prefix = isDefault === true ? 'autotest_default_config' : 'autotest_config';
+      const filename = `${prefix}_${stamp}.toml`;
 
-      if (window && window.require) {
+      if (electronAPI) {
         // Electron 环境：通过主进程弹出原生保存对话框
-        const { ipcRenderer } = window.require('electron');
-        const result = await ipcRenderer.invoke('save-file', { content: tomlContent, filename });
+        const result = await electronAPI.saveFile({ content: tomlContent, filename });
         if (result.success) {
           addLog(`配置已导出: ${result.filePath}`);
         } else if (!result.cancelled) {
@@ -1261,24 +1669,26 @@ function App() {
         alert('配置文件解析失败，请检查 TOML 格式是否正确');
         return;
       }
-      const { newApiSettings, newDbSettings, newSystemDbConfig, newSystemSettings } = parsed;
+      const { newApiSettings, newDbSettings, newSystemDbConfig, newSystemSettings, newDefaultTableSettings } = parsed;
 
       setApiSettings(newApiSettings);
       setDbSettings(newDbSettings);
       setSystemDbConfig(newSystemDbConfig);
       setSystemSettings(newSystemSettings);
+      if (newDefaultTableSettings) setDefaultTableSettings(newDefaultTableSettings);
 
       // 持久化
       localStorage.setItem('apiSettings', JSON.stringify(newApiSettings));
       localStorage.setItem('dbSettings', JSON.stringify(newDbSettings));
       localStorage.setItem('systemDbConfig', JSON.stringify(newSystemDbConfig));
       localStorage.setItem('systemSettings', JSON.stringify(newSystemSettings));
+      if (newDefaultTableSettings) localStorage.setItem('defaultTableSettings', JSON.stringify(newDefaultTableSettings));
 
       // 同步给主进程
-      if (window && window.require) {
+      if (electronAPI) {
         try {
-          const { ipcRenderer } = window.require('electron');
-          ipcRenderer.invoke('save-table-settings', newSystemSettings.tables)
+          const mergedTables = { ...(newDefaultTableSettings?.tables || {}), ...newSystemSettings.tables };
+          electronAPI.saveTableSettings(mergedTables)
             .catch(err2 => console.warn('[renderer] import sync failed:', err2));
         } catch (err2) {
           console.warn('[renderer] ipc not available:', err2);
@@ -1286,7 +1696,7 @@ function App() {
       }
 
       addLog(`配置导入成功: ${file.name}`);
-      alert(`✅ 配置导入成功！\n已更新: API设置、数据库配置、系统表配置`);
+      alert(`✅ 配置导入成功！\n已更新: API设置、数据库配置、系统表配置、默认表配置`);
     };
     reader.onerror = () => alert('读取文件出错，请重试');
     reader.readAsText(file, 'utf-8');
@@ -1359,13 +1769,6 @@ function App() {
       }, 3000);
     }
   };
-
-  // 当环境切换时，自动更新API地址
-  useEffect(() => {
-    if (apiSettings[selectedEnvironment]) {
-      setApiUrl(apiSettings[selectedEnvironment].request_url);
-    }
-  }, [selectedEnvironment, apiSettings]);
 
   // 处理点击外部关闭下拉菜单
   useEffect(() => {
@@ -1554,7 +1957,9 @@ function App() {
     const savedSettings = localStorage.getItem('apiSettings');
     if (savedSettings) {
       try {
-        setApiSettings(JSON.parse(savedSettings));
+        startTransition(() => {
+          setApiSettings(JSON.parse(savedSettings));
+        });
       } catch (error) {
         console.error('加载API设置失败:', error);
       }
@@ -1566,7 +1971,9 @@ function App() {
     const savedDbSettings = localStorage.getItem('dbSettings');
     if (savedDbSettings) {
       try {
-        setDbSettings(JSON.parse(savedDbSettings));
+        startTransition(() => {
+          setDbSettings(JSON.parse(savedDbSettings));
+        });
       } catch (error) {
         console.error('加载数据库设置失败:', error);
       }
@@ -1576,7 +1983,9 @@ function App() {
     const savedSystemDbConfig = localStorage.getItem('systemDbConfig');
     if (savedSystemDbConfig) {
       try {
-        setSystemDbConfig(JSON.parse(savedSystemDbConfig));
+        startTransition(() => {
+          setSystemDbConfig(JSON.parse(savedSystemDbConfig));
+        });
       } catch (error) {
         console.error('加载系统级数据库配置失败:', error);
       }
@@ -1587,24 +1996,84 @@ function App() {
     if (savedSystemSettings) {
       try {
         const parsed = JSON.parse(savedSystemSettings);
-        // 校验数据格式，过滤掉 config 为 null/undefined 的条目
         if (parsed && parsed.tables && typeof parsed.tables === 'object') {
           const sanitizedTables = {};
           for (const [tName, tConfig] of Object.entries(parsed.tables)) {
             if (tConfig && typeof tConfig === 'object') {
               sanitizedTables[tName] = {
+                chineseName: tConfig.chineseName || '',
                 primaryKey: tConfig.primaryKey || '',
                 conditionFields: Array.isArray(tConfig.conditionFields) ? tConfig.conditionFields : []
               };
             }
           }
-          setSystemSettings({ tables: sanitizedTables });
+          startTransition(() => {
+            setSystemSettings({ tables: sanitizedTables });
+          });
         }
       } catch (error) {
         console.error('加载系统配置失败:', error);
       }
     }
+
+    // 从本地存储加载默认表配置
+    const savedDefaultTableSettings = localStorage.getItem('defaultTableSettings');
+    if (savedDefaultTableSettings) {
+      try {
+        const parsed = JSON.parse(savedDefaultTableSettings);
+        if (parsed && parsed.tables && typeof parsed.tables === 'object') {
+          const sanitizedTables = {};
+          for (const [tName, tConfig] of Object.entries(parsed.tables)) {
+            if (tConfig && typeof tConfig === 'object') {
+              sanitizedTables[tName] = {
+                chineseName: tConfig.chineseName || '',
+                primaryKey: tConfig.primaryKey || '',
+                conditionFields: Array.isArray(tConfig.conditionFields) ? tConfig.conditionFields : []
+              };
+            }
+          }
+          startTransition(() => {
+            setDefaultTableSettings({ tables: sanitizedTables });
+          });
+        }
+      } catch (error) {
+        console.error('加载默认表配置失败:', error);
+      }
+    }
   }, []);
+
+  // 保持 ref 与最新 state 同步（供异步函数使用）
+  useEffect(() => { systemDbConfigRef.current = systemDbConfig; }, [systemDbConfig]);
+  useEffect(() => { apiSettingsRef.current = apiSettings; }, [apiSettings]);
+
+  // 应用启动时若已有登录态（sessionStorage 中有 authSession），自动加载 API 地址
+  useEffect(() => {
+    if (authUser && apiStatus === 'idle') {
+      // 延迟一帧，确保 systemDbConfigRef 已同步
+      const t = setTimeout(() => { fetchApiSettingsFromDb(); }, 200);
+      return () => clearTimeout(t);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser]);
+
+  if (!authUser) {
+    return (
+      <LoginScreen
+        onLogin={handleLogin}
+        isAuthenticating={isAuthenticating}
+        errorMessage={loginError}
+        authApiBaseUrl={authApiBaseUrl}
+        onAuthApiBaseUrlChange={setAuthApiBaseUrl}
+        captchaSrc={captchaSrc}
+        captchaUuid={captchaUuid}
+        captchaLoading={captchaLoading}
+        captchaEnabled={captchaEnabled}
+        onRefreshCaptcha={fetchCaptcha}
+        captchaCode={loginCaptchaCode}
+        onCaptchaCodeChange={setLoginCaptchaCode}
+      />
+    );
+  }
 
   return (
     <div className="app">
@@ -1618,10 +2087,22 @@ function App() {
           <span className="header-badge">查-发-查-比</span>
         </div>
         <div className="header-right">
+          <div className="user-chip">
+            <span className="user-chip-label">当前用户</span>
+            <span className="user-chip-name">{authUser.displayName}</span>
+          </div>
+
           {/* 状态显示 */}
-          <div className="status-container">
-            <span className="status-dot"></span>
-            <span className="status-text">就绪</span>
+          <div
+            className="status-container"
+            title={apiStatus === 'error' ? apiStatusMsg : ''}
+            style={{ cursor: apiStatus === 'error' ? 'pointer' : 'default' }}
+            onClick={apiStatus === 'error' ? fetchApiSettingsFromDb : undefined}
+          >
+            <span className={`status-dot status-dot--${apiStatus}`}></span>
+            <span className={`status-text ${apiStatus === 'error' ? 'status-text--error' : ''}`}>
+              {apiStatus === 'loading' ? '加载中' : apiStatus === 'error' ? '连接失败' : '就绪'}
+            </span>
           </div>
           
           {/* 明暗主题切换按钮 */}
@@ -1671,12 +2152,17 @@ function App() {
             {showSettingsDropdown && (
               <div className="dropdown-menu">
                 <button className="dropdown-item" onClick={handleSystemSettingsClick}>系统设置</button>
+                <button className="dropdown-item" onClick={handleDefaultTableSettingsClick}>默认表配置</button>
                 <button className="dropdown-item" onClick={handleDbSettingsClick}>数据库配置</button>
                 <button className="dropdown-item" onClick={handleApiSettingsClick}>API设置</button>
                 <button className="dropdown-item">关于</button>
               </div>
             )}
           </div>
+
+          <button className="btn-logout" onClick={handleLogout}>
+            退出登录
+          </button>
         </div>
       </header>
 
@@ -1810,7 +2296,11 @@ function App() {
                   </div>
                 ) : (
                   logs.map((log, index) => (
-                    <div key={index} className={`log-line ${getLogClass(log.level)}`}>
+                    <div
+                      key={log.id ?? index}
+                      className={`log-line ${getLogClass(log.level)}`}
+                      style={{ '--log-i': Math.min(index, 25) }}
+                    >
                       <span className="log-time">{log.timestamp}</span>
                       <span className={`log-level level-${log.level?.toLowerCase()}`}>{log.level}</span>
                       <span className="log-msg">{log.message}</span>
@@ -1843,13 +2333,13 @@ function App() {
                         <span className="result-msg">{result.message}</span>
                       </div>
                       <div className="result-sql-section">
-                        <div className="sql-block">
+                        <div className="sql-block clickable-sql" onClick={() => handleSqlClick(result.table, result.details)} style={{ cursor: 'pointer' }} title="点击查看具体数据对比">
                           <div className="sql-label">执行前 SQL</div>
                           <code className="sql-code">{result.details?.before?.sql || 'N/A'}</code>
                           <div className="sql-count">记录数: {result.details?.before?.count || 0}</div>
                         </div>
                         <div className="sql-arrow">→</div>
-                        <div className="sql-block">
+                        <div className="sql-block clickable-sql" onClick={() => handleSqlClick(result.table, result.details)} style={{ cursor: 'pointer' }} title="点击查看具体数据对比">
                           <div className="sql-label">执行后 SQL</div>
                           <code className="sql-code">{result.details?.after?.sql || 'N/A'}</code>
                           <div className="sql-count">记录数: {result.details?.after?.count || 0}</div>
@@ -2081,7 +2571,19 @@ function App() {
                           {dbSettings[env].map((ds, index) => (
                             <div key={index} className="db-data-source-card">
                               <div className="db-data-source-header">
-                                <span>数据源 {index + 1}</span>
+                                <div className="db-data-source-header-left">
+                                  <span>数据源 {index + 1}</span>
+                                  <select
+                                    value={ds.dus || 'bdus'}
+                                    onChange={(e) => handleDbSettingChange(env, index, 'dus', e.target.value)}
+                                    className="select-dus"
+                                    title="选择数据源类型（DUS）"
+                                  >
+                                    <option value="bdus">bdus</option>
+                                    <option value="bto">bto</option>
+                                    <option value="cdus">cdus</option>
+                                  </select>
+                                </div>
                                 <button 
                                   className="btn-icon btn-danger"
                                   onClick={() => removeDataSource(env, index)}
@@ -2229,9 +2731,25 @@ function App() {
             </div>
             <div className="modal-body">
               <div className="system-settings-container">
-                <h4>表配置</h4>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                  <h4 style={{ margin: 0 }}>表配置</h4>
+                  <input
+                    type="text"
+                    placeholder="模糊搜索表名或中文名..."
+                    value={tableSearchQuery}
+                    onChange={(e) => setTableSearchQuery(e.target.value)}
+                    className="input search-input"
+                    style={{ width: '250px' }}
+                  />
+                </div>
                 <div className="table-configs">
-                  {Object.entries(systemSettings.tables).filter(([, config]) => config && typeof config === 'object').map(([tableName, config]) => (
+                  {Object.entries(systemSettings.tables).filter(([tableName, config]) => {
+                    if (!config || typeof config !== 'object') return false;
+                    const query = tableSearchQuery.toLowerCase();
+                    if (!query) return true;
+                    const chineseName = config.chineseName || '';
+                    return tableName.toLowerCase().includes(query) || chineseName.toLowerCase().includes(query);
+                  }).map(([tableName, config]) => (
                     <div key={tableName} className="table-config-card">
                       <div className="table-config-header">
                         <input
@@ -2256,6 +2774,26 @@ function App() {
                           }}
                           className="input table-name-input"
                           placeholder="表名"
+                          style={{ flex: 1 }}
+                        />
+                        <input
+                          type="text"
+                          value={config.chineseName || ''}
+                          onChange={(e) => {
+                            setSystemSettings(prev => ({
+                              ...prev,
+                              tables: {
+                                ...prev.tables,
+                                [tableName]: {
+                                  ...prev.tables[tableName],
+                                  chineseName: e.target.value
+                                }
+                              }
+                            }));
+                          }}
+                          className="input table-chinese-input"
+                          placeholder="中文名"
+                          style={{ marginLeft: '10px', flex: 1 }}
                         />
                         <button 
                           className="btn-icon btn-danger"
@@ -2273,25 +2811,52 @@ function App() {
                       </div>
                       <div className="table-config-body">
                         <div className="table-config-field">
-                          <label>主键</label>
-                          <input
-                            type="text"
-                            value={config.primaryKey || ''}
-                            onChange={(e) => {
-                              setSystemSettings(prev => ({
-                                ...prev,
-                                tables: {
-                                  ...prev.tables,
-                                  [tableName]: {
-                                    ...prev.tables[tableName],
-                                    primaryKey: e.target.value
-                                  }
-                                }
-                              }));
-                            }}
-                            className="input"
-                            placeholder="输入主键字段"
-                          />
+                          <div className="pk-dus-row">
+                            <div className="pk-field">
+                              <label>主键</label>
+                              <input
+                                type="text"
+                                value={config.primaryKey || ''}
+                                onChange={(e) => {
+                                  setSystemSettings(prev => ({
+                                    ...prev,
+                                    tables: {
+                                      ...prev.tables,
+                                      [tableName]: {
+                                        ...prev.tables[tableName],
+                                        primaryKey: e.target.value
+                                      }
+                                    }
+                                  }));
+                                }}
+                                className="input"
+                                placeholder="输入主键字段"
+                              />
+                            </div>
+                            <div className="dus-field">
+                              <label>DUS</label>
+                              <select
+                                value={config.dus || 'bdus'}
+                                onChange={(e) => {
+                                  setSystemSettings(prev => ({
+                                    ...prev,
+                                    tables: {
+                                      ...prev.tables,
+                                      [tableName]: {
+                                        ...prev.tables[tableName],
+                                        dus: e.target.value
+                                      }
+                                    }
+                                  }));
+                                }}
+                                className="select-dus"
+                              >
+                                <option value="bdus">bdus</option>
+                                <option value="bto">bto</option>
+                                <option value="cdus">cdus</option>
+                              </select>
+                            </div>
+                          </div>
                         </div>
                         
                         <h6>查询条件</h6>
@@ -2459,6 +3024,7 @@ function App() {
                         tables: {
                           ...prev.tables,
                           [newTableName]: {
+                            chineseName: '',
                             primaryKey: '',
                             conditionFields: []
                           }
@@ -2476,7 +3042,7 @@ function App() {
               <div className="modal-footer-left">
                 <button
                   className="btn-config-io btn-export"
-                  onClick={handleExportSettings}
+                  onClick={() => handleExportSettings(false)}
                   title="导出全部配置为 TOML 文件"
                 >
                   <span className="btn-io-icon">↑</span> 导出配置
@@ -2499,6 +3065,369 @@ function App() {
                 <button 
                   className="btn-primary" 
                   onClick={handleSaveSystemSettings}
+                >
+                  保存设置
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 默认表配置模态框 */}
+      {showDefaultTableSettings && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1, paddingRight: '20px' }}>
+                <h3 style={{ whiteSpace: 'nowrap', margin: 0 }}>默认表配置</h3>
+                <div className="modal-subtitle" style={{ fontSize: '12px', color: '#888', lineHeight: '1.4', margin: 0 }}>
+                  默认表配置为系统默认的表规则配置，不可修改，若不符合您的要求，请在<strong style={{ color: 'var(--text-primary)', fontWeight: 'bold' }}>系统配置</strong>中覆盖相应的表规则，系统会优先使用用户自定义规则
+                </div>
+              </div>
+              <button 
+                className="modal-close" 
+                onClick={() => setShowDefaultTableSettings(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="system-settings-container">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                  <h4 style={{ margin: 0 }}>表配置</h4>
+                  <input
+                    type="text"
+                    placeholder="模糊搜索表名或中文名..."
+                    value={defaultTableSearchQuery}
+                    onChange={(e) => setDefaultTableSearchQuery(e.target.value)}
+                    className="input search-input"
+                    style={{ width: '250px' }}
+                  />
+                </div>
+                <div className="table-configs">
+                  {Object.entries(defaultTableSettings.tables).filter(([tableName, config]) => {
+                    if (!config || typeof config !== 'object') return false;
+                    const query = defaultTableSearchQuery.toLowerCase();
+                    if (!query) return true;
+                    const chineseName = config.chineseName || '';
+                    return tableName.toLowerCase().includes(query) || chineseName.toLowerCase().includes(query);
+                  }).map(([tableName, config]) => (
+                    <div key={tableName} className="table-config-card">
+                      <div className="table-config-header">
+                        <input
+                          type="text"
+                          value={tableName}
+                          onChange={(e) => {
+                            const newTableName = e.target.value;
+                            if (newTableName && newTableName !== tableName) {
+                              setDefaultTableSettings(prev => {
+                                const newSettings = { ...prev };
+                                const existing = newSettings.tables[tableName];
+                                if (existing) {
+                                  newSettings.tables = {
+                                    ...newSettings.tables,
+                                    [newTableName]: existing
+                                  };
+                                  delete newSettings.tables[tableName];
+                                }
+                                return newSettings;
+                              });
+                            }
+                          }}
+                          className="input table-name-input"
+                          placeholder="表名"
+                          style={{ flex: 1 }}
+                        />
+                        <input
+                          type="text"
+                          value={config.chineseName || ''}
+                          onChange={(e) => {
+                            setDefaultTableSettings(prev => ({
+                              ...prev,
+                              tables: {
+                                ...prev.tables,
+                                [tableName]: {
+                                  ...prev.tables[tableName],
+                                  chineseName: e.target.value
+                                }
+                              }
+                            }));
+                          }}
+                          className="input table-chinese-input"
+                          placeholder="中文名"
+                          style={{ marginLeft: '10px', flex: 1 }}
+                        />
+                        <button 
+                          className="btn-icon btn-danger"
+                          onClick={() => {
+                            setDefaultTableSettings(prev => {
+                              const newSettings = { ...prev };
+                              delete newSettings.tables[tableName];
+                              return newSettings;
+                            });
+                          }}
+                          title="删除表"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="table-config-body">
+                        <div className="table-config-field">
+                          <div className="pk-dus-row">
+                            <div className="pk-field">
+                              <label>主键</label>
+                              <input
+                                type="text"
+                                value={config.primaryKey || ''}
+                                onChange={(e) => {
+                                  setDefaultTableSettings(prev => ({
+                                    ...prev,
+                                    tables: {
+                                      ...prev.tables,
+                                      [tableName]: {
+                                        ...prev.tables[tableName],
+                                        primaryKey: e.target.value
+                                      }
+                                    }
+                                  }));
+                                }}
+                                className="input"
+                                placeholder="输入主键字段"
+                              />
+                            </div>
+                            <div className="dus-field">
+                              <label>DUS</label>
+                              <select
+                                value={config.dus || 'bdus'}
+                                onChange={(e) => {
+                                  setDefaultTableSettings(prev => ({
+                                    ...prev,
+                                    tables: {
+                                      ...prev.tables,
+                                      [tableName]: {
+                                        ...prev.tables[tableName],
+                                        dus: e.target.value
+                                      }
+                                    }
+                                  }));
+                                }}
+                                className="select-dus"
+                              >
+                                <option value="bdus">bdus</option>
+                                <option value="bto">bto</option>
+                                <option value="cdus">cdus</option>
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+                        
+                        <h6>查询条件</h6>
+                        <div className="condition-fields">
+                          {config.conditionFields.map((condition, index) => (
+                            <div key={index} className="condition-field-card">
+                              <div className="condition-field-row">
+                                <div className="condition-field-item">
+                                  <label>字段名</label>
+                                  <input
+                                    type="text"
+                                    value={condition.field || ''}
+                                    onChange={(e) => {
+                                      setDefaultTableSettings(prev => {
+                                        const newSettings = { ...prev };
+                                        newSettings.tables[tableName].conditionFields[index].field = e.target.value;
+                                        return newSettings;
+                                      });
+                                    }}
+                                    className="input"
+                                    placeholder="输入字段名"
+                                  />
+                                </div>
+                                <div className="condition-field-item">
+                                  <label>来源</label>
+                                  <select
+                                    value={condition.source || 'request'}
+                                    onChange={(e) => {
+                                      setDefaultTableSettings(prev => {
+                                        const newSettings = { ...prev };
+                                        newSettings.tables[tableName].conditionFields[index].source = e.target.value;
+                                        return newSettings;
+                                      });
+                                    }}
+                                    className="input"
+                                  >
+                                    <option value="request">请求报文</option>
+                                    <option value="route">路由结果</option>
+                                    <option value="table">其他表</option>
+                                  </select>
+                                </div>
+                              </div>
+                              {condition.source === 'table' ? (
+                                <>
+                                  <div className="condition-field-row">
+                                    <div className="condition-field-item">
+                                      <label>选择表</label>
+                                      <select
+                                        value={condition.selectedTable || ''}
+                                        onChange={(e) => {
+                                          setDefaultTableSettings(prev => {
+                                            const newSettings = { ...prev };
+                                            newSettings.tables[tableName].conditionFields[index].selectedTable = e.target.value;
+                                            newSettings.tables[tableName].conditionFields[index].path = e.target.value ? `${e.target.value}.` : '';
+                                            return newSettings;
+                                          });
+                                        }}
+                                        className="input"
+                                      >
+                                        <option value="">请选择表</option>
+                                        {Object.keys(defaultTableSettings.tables).filter(t => t !== tableName).map(t => (
+                                          <option key={t} value={t}>{t}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                    <div className="condition-field-item">
+                                      <label>字段名</label>
+                                      <input
+                                        type="text"
+                                        value={condition.path ? condition.path.split('.')[1] || '' : ''}
+                                        onChange={(e) => {
+                                          setDefaultTableSettings(prev => {
+                                            const newSettings = { ...prev };
+                                            if (condition.selectedTable) {
+                                              newSettings.tables[tableName].conditionFields[index].path = `${condition.selectedTable}.${e.target.value}`;
+                                            }
+                                            return newSettings;
+                                          });
+                                        }}
+                                        className="input"
+                                        placeholder="输入字段名"
+                                      />
+                                    </div>
+                                  </div>
+                                </>
+                              ) : (
+                                <div className="condition-field-row">
+                                  <div className="condition-field-item full-width">
+                                    <label>路径</label>
+                                    <input
+                                      type="text"
+                                      value={condition.path || ''}
+                                      onChange={(e) => {
+                                        setDefaultTableSettings(prev => {
+                                          const newSettings = { ...prev };
+                                          newSettings.tables[tableName].conditionFields[index].path = e.target.value;
+                                          return newSettings;
+                                        });
+                                      }}
+                                      className="input"
+                                      placeholder="输入路径 (如: txBody.txEntity.mediumNo)"
+                                    />
+                                  </div>
+                                </div>
+                              )}
+                              <div className="condition-field-row" style={{ justifyContent: 'space-between' }}>
+                                <div className="condition-field-item inline">
+                                  <label>必填</label>
+                                  <input
+                                    type="checkbox"
+                                    checked={condition.required || false}
+                                    onChange={(e) => {
+                                      setDefaultTableSettings(prev => {
+                                        const newSettings = { ...prev };
+                                        newSettings.tables[tableName].conditionFields[index].required = e.target.checked;
+                                        return newSettings;
+                                      });
+                                    }}
+                                  />
+                                </div>
+                                <button 
+                                  className="btn-icon btn-danger"
+                                  onClick={() => {
+                                    setDefaultTableSettings(prev => {
+                                      const newSettings = { ...prev };
+                                      newSettings.tables[tableName].conditionFields = newSettings.tables[tableName].conditionFields.filter((_, i) => i !== index);
+                                      return newSettings;
+                                    });
+                                  }}
+                                  title="删除条件"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                          <button 
+                            className="btn-icon add-condition-btn"
+                            onClick={() => {
+                              setDefaultTableSettings(prev => {
+                                const newSettings = { ...prev };
+                                newSettings.tables[tableName].conditionFields.push({
+                                  field: '',
+                                  source: 'request',
+                                  path: '',
+                                  required: false
+                                });
+                                return newSettings;
+                              });
+                            }}
+                            title="添加条件"
+                          >
+                            + 添加条件
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  <button 
+                    className="btn-icon add-table-btn"
+                    onClick={() => {
+                      const newTableName = `new_table_${Date.now()}`;
+                      setDefaultTableSettings(prev => ({
+                        ...prev,
+                        tables: {
+                          ...prev.tables,
+                          [newTableName]: {
+                            chineseName: '',
+                            primaryKey: '',
+                            conditionFields: []
+                          }
+                        }
+                      }));
+                    }}
+                    title="添加表"
+                  >
+                    + 添加表
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <div className="modal-footer-left">
+                <button
+                  className="btn-config-io btn-export"
+                  onClick={() => handleExportSettings(true)}
+                  title="导出全部配置为 TOML 文件"
+                >
+                  <span className="btn-io-icon">↑</span> 导出配置
+                </button>
+                <button
+                  className="btn-config-io btn-import"
+                  onClick={handleImportClick}
+                  title="从 TOML 文件导入配置"
+                >
+                  <span className="btn-io-icon">↓</span> 导入配置
+                </button>
+              </div>
+              <div className="modal-footer-right">
+                <button 
+                  className="btn-secondary" 
+                  onClick={() => setShowDefaultTableSettings(false)}
+                >
+                  取消
+                </button>
+                <button 
+                  className="btn-primary" 
+                  onClick={handleSaveDefaultTableSettings}
                 >
                   保存设置
                 </button>
@@ -2551,6 +3480,41 @@ function App() {
         style={{ display: 'none' }}
         onChange={handleImportFile}
       />
+      {/* SQL 数据对比模态框 */}
+      {showDataModal && (
+        <div className="modal-overlay">
+          <div className="modal-content sql-data-modal" style={{ maxWidth: '85%', width: '1200px' }}>
+            <div className="modal-header">
+              <h3>{dataModalContent.title} - 数据对比明细</h3>
+              <button className="btn-close" onClick={() => setShowDataModal(false)}>×</button>
+            </div>
+            <div className="modal-body" style={{ maxHeight: '70vh', overflowY: 'auto', padding: '10px 20px' }}>
+              <div style={{ display: 'flex', gap: '20px', marginBottom: '20px' }}>
+                <div className="sql-statement" style={{ flex: 1, padding: '16px', backgroundColor: '#1e1e1e', borderRadius: '8px', border: '1px solid #333', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.2)' }}>
+                  <div style={{ color: '#858585', marginBottom: '10px', fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px' }}>执行前 SQL 语句</div>
+                  <code style={{ display: 'block', wordBreak: 'break-all', color: '#ce9178', fontFamily: '"Fira Code", "Consolas", monospace', fontSize: '14px', lineHeight: '1.6' }}>{dataModalContent.beforeSql}</code>
+                </div>
+                <div className="sql-statement" style={{ flex: 1, padding: '16px', backgroundColor: '#1e1e1e', borderRadius: '8px', border: '1px solid #333', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.2)' }}>
+                  <div style={{ color: '#858585', marginBottom: '10px', fontSize: '12px', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px' }}>执行后 SQL 语句</div>
+                  <code style={{ display: 'block', wordBreak: 'break-all', color: '#ce9178', fontFamily: '"Fira Code", "Consolas", monospace', fontSize: '14px', lineHeight: '1.6' }}>{dataModalContent.afterSql}</code>
+                </div>
+              </div>
+              
+              {dataModalContent.beforeData.length === 0 && dataModalContent.afterData.length === 0 ? (
+                <div className="empty-state" style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-secondary)', backgroundColor: 'var(--bg-lighter)', borderRadius: '6px' }}>
+                  <div style={{ fontSize: '24px', marginBottom: '10px' }}>📭</div>
+                  暂无查询数据
+                </div>
+              ) : (
+                renderDataComparisonTable()
+              )}
+            </div>
+            <div className="modal-footer" style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end', paddingTop: '15px', borderTop: '1px solid var(--border-color)' }}>
+              <button className="btn-secondary" onClick={() => setShowDataModal(false)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,9 +1,12 @@
 import { app, BrowserWindow, Menu, ipcMain, dialog } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { platform } from 'os';
+/* global process */
 import { writeFile } from 'fs/promises';
 import { DataConsistencyChecker } from './backend/db_checker.js';
+import pg from 'pg';
+
+const { Client } = pg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,8 +14,12 @@ const __dirname = path.dirname(__filename);
 // 添加 GPU 相关的启动选项，解决 GPU 进程崩溃问题
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-software-rasterizer');
-app.commandLine.appendSwitch('no-sandbox');
-app.commandLine.appendSwitch('disable-setuid-sandbox');
+
+const isDev = process.env.NODE_ENV === 'development';
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 function startBackend() {
   console.log('Backend execution has been migrated to Node.js.');
@@ -20,50 +27,81 @@ function startBackend() {
 
 // 主进程缓存的 tableSettings，即使旧表单页面没有传入也能使用
 let cachedTableSettings = {};
+let backendProcess = null;
 
 // 注册 IPC：前端主动保存 tableSettings到主进程
 ipcMain.handle('save-table-settings', async (event, tableSettings) => {
-  if (tableSettings && typeof tableSettings === 'object') {
+  if (isPlainObject(tableSettings)) {
     cachedTableSettings = tableSettings;
     console.log('[main] tableSettings cached, tables:', Object.keys(tableSettings));
+    return { ok: true };
   }
-  return { ok: true };
+  return { ok: false, error: 'Invalid table settings payload' };
 });
 
 // 注册 IPC 调用处理 JS 版本的数据校验
 ipcMain.handle('run-node-check', async (event, requestPayload) => {
+  if (!isPlainObject(requestPayload)) {
+    throw new Error('Invalid request payload');
+  }
+
+  let resourcesPath;
+  if (app.isPackaged) {
+    resourcesPath = process.resourcesPath;
+  } else {
+    resourcesPath = __dirname;
+  }
+  const configPath = path.join(resourcesPath, 'backend', 'config', 'config.json');
+  const checker = new DataConsistencyChecker(configPath);
+  let normalizedPayload = { ...requestPayload };
+
+  // 如果 payload 里没有 tableSettings，用主进程缓存的干干
+  if (!isPlainObject(normalizedPayload.tableSettings) || Object.keys(normalizedPayload.tableSettings).length === 0) {
+    if (Object.keys(cachedTableSettings).length > 0) {
+      console.log('[main] tableSettings missing in payload, using cached version');
+      normalizedPayload = { ...normalizedPayload, tableSettings: cachedTableSettings };
+    }
+  } else {
+    // 更新缓存
+    cachedTableSettings = normalizedPayload.tableSettings;
+  }
+
+  return await checker.runCheck(normalizedPayload);
+});
+
+// 注册 IPC：查询系统数据库（通用单次查询）
+ipcMain.handle('query-system-db', async (event, { dbConfig, sql, values = [] }) => {
+  if (!dbConfig || !sql) {
+    throw new Error('缺少数据库配置或 SQL 语句');
+  }
+  const client = new Client({
+    host: dbConfig.host,
+    port: dbConfig.port,
+    user: dbConfig.user,
+    password: dbConfig.password,
+    database: dbConfig.database,
+    connectionTimeoutMillis: 8000,
+  });
+  await client.connect();
   try {
-    let resourcesPath;
-    if (app.isPackaged) {
-      resourcesPath = process.resourcesPath;
-    } else {
-      resourcesPath = __dirname;
-    }
-    const configPath = path.join(resourcesPath, 'backend', 'config', 'config.json');
-    const checker = new DataConsistencyChecker(configPath);
-
-    // 如果 payload 里没有 tableSettings，用主进程缓存的干干
-    if (!requestPayload.tableSettings || Object.keys(requestPayload.tableSettings).length === 0) {
-      if (Object.keys(cachedTableSettings).length > 0) {
-        console.log('[main] tableSettings missing in payload, using cached version');
-        requestPayload = { ...requestPayload, tableSettings: cachedTableSettings };
-      }
-    } else {
-      // 更新缓存
-      cachedTableSettings = requestPayload.tableSettings;
-    }
-
-    return await checker.runCheck(requestPayload);
-  } catch (err) {
-    throw err;
+    const res = await client.query(sql, values);
+    return { rows: res.rows };
+  } finally {
+    await client.end();
   }
 });
 
 // 注册 IPC：保存文件（导出配置）
-ipcMain.handle('save-file', async (event, { content, filename }) => {
+ipcMain.handle('save-file', async (event, payload) => {
   try {
+    const { content, filename } = payload ?? {};
+    if (typeof content !== 'string' || typeof filename !== 'string') {
+      return { success: false, error: 'Invalid save payload' };
+    }
+
+    const safeFilename = path.basename(filename);
     const { filePath, canceled } = await dialog.showSaveDialog({
-      defaultPath: filename,
+      defaultPath: safeFilename,
       filters: [
         { name: 'TOML 配置文件', extensions: ['toml'] },
         { name: '所有文件', extensions: ['*'] }
@@ -97,13 +135,22 @@ function createWindow() {
     title: '数据一致性自动化核对工具',
     icon: path.join(__dirname, 'public', 'icons', 'api_post256x256.ico'),
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-      enableRemoteModule: true
+      preload: path.join(__dirname, 'preload.cjs'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
+      enableRemoteModule: false,
+      webSecurity: true
     }
   });
 
-  const isDev = process.env.NODE_ENV === 'development';
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const allowedPrefix = isDev ? 'http://localhost:5173' : 'file://';
+    if (!url.startsWith(allowedPrefix)) {
+      event.preventDefault();
+    }
+  });
   
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
@@ -111,7 +158,9 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
 
-  mainWindow.webContents.openDevTools({ mode: 'detach' });
+  if (isDev) {
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
+  }
 }
 
 // 创建应用程序菜单，包含编辑功能
