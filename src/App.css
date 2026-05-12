@@ -1223,6 +1223,16 @@ body::after {
   border: 1px solid rgba(248, 113, 113, 0.2);
 }
 
+.badge-skip {
+  background: rgba(251, 146, 60, 0.12);
+  color: #f97316;
+  border: 1px solid rgba(251, 146, 60, 0.28);
+}
+
+.result-skip {
+  border-left: 3px solid #f97316;
+}
+
 .result-table-name {
   font-size: 14px;
   font-weight: 600;

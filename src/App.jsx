@@ -649,97 +649,194 @@ function App() {
         throw new Error('请求报文格式错误，请检查JSON格式');
       }
 
-      // 处理请求报文中的字段
-      addLog('处理请求报文中的字段...');
-      const date = new Date();
-
-      // 格式化日期为 YYYYMMDD
-      const curYearMonDay =
-        date.getFullYear() +
-        (date.getMonth() + 1).toString().padStart(2, '0') +
-        date.getDate().toString().padStart(2, '0');
-
-      // 格式化时间为 HHMMSSNNN
-      const time1 =
-        date.getHours().toString().padStart(2, '0') +
-        date.getMinutes().toString().padStart(2, '0') +
-        date.getSeconds().toString().padStart(2, '0') +
-        date.getMilliseconds().toString().padStart(3, '0');
-
-      // 生成格式化时间戳 YYYYMMDDHHMMSSNNN
-      const generateTimestamp = (date) => {
-        const year = date.getFullYear().toString();
-        const month = (date.getMonth() + 1).toString().padStart(2, '0');
-        const day = date.getDate().toString().padStart(2, '0');
-        const hours = date.getHours().toString().padStart(2, '0');
-        const minutes = date.getMinutes().toString().padStart(2, '0');
-        const seconds = date.getSeconds().toString().padStart(2, '0');
-        const milliseconds = date.getMilliseconds().toString().padStart(3, '0');
-
-        return `${year}${month}${day}${hours}${minutes}${seconds}${milliseconds}`;
+      // ---- 辅助：为报文生成并写入动态字段（时间戳、跟踪号、tenantId）----
+      const applyDynamicFields = (data) => {
+        const d = new Date();
+        const ymd =
+          d.getFullYear() +
+          (d.getMonth() + 1).toString().padStart(2, '0') +
+          d.getDate().toString().padStart(2, '0');
+        const hms =
+          d.getHours().toString().padStart(2, '0') +
+          d.getMinutes().toString().padStart(2, '0') +
+          d.getSeconds().toString().padStart(2, '0') +
+          d.getMilliseconds().toString().padStart(3, '0');
+        const ts = ymd + hms;
+        const rnd = Math.floor(Math.random() * 10).toString();
+        const subtx = '10221990001111000000000' + rnd + ymd;
+        const trackNo =
+          ts + '1022199CK001' + Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+        if (data.txHeader) {
+          data.txHeader.globalBusiTrackNo = trackNo;
+          data.txHeader.subtxNo = subtx;
+          data.txHeader.txStartTime = ts;
+          data.txHeader.txSendTime = ts;
+          if (selectedEnvironment === 'TEST') {
+            data.txHeader.tenantId = 'QHGD';
+          } else if (selectedEnvironment === 'PREPROD') {
+            data.txHeader.tenantId = 'PROD';
+          } else {
+            data.txHeader.tenantId = selectedEnvironment;
+          }
+        }
+        return { trackNo, subtx, ts };
       };
 
-      // 生成子交易号 (32位)
-      const randomChar = Math.floor(Math.random() * 10).toString();
-      const subtxNo = '10221990001111000000000' + randomChar + curYearMonDay;
+      // ---- 辅助：请求 MAC 并写回 txHeader.msgrptMac ----
+      const applyMac = async (data, label) => {
+        const macUrl = apiSettings[selectedEnvironment]?.mac_url;
+        if (!macUrl) {
+          addLog(`[${label}] mac_url未配置或为空，跳过MAC获取步骤`, 'INFO');
+          return;
+        }
+        addLog(`[${label}] 调用mac_url获取msgrptMac值: ${macUrl}`);
+        const macResponse = await axios.post(macUrl, data);
+        const msgrptMac = macResponse.data;
+        if (!msgrptMac || typeof msgrptMac !== 'string') {
+          throw new Error(`[${label}] mac_url返回的值不是有效字符串`);
+        }
+        if (data.txHeader) {
+          data.txHeader.msgrptMac = msgrptMac;
+          addLog(`[${label}] msgrptMac替换成功: ${msgrptMac}`);
+        }
+      };
 
-      // 生成时间戳 (YYYYMMDDHHMMSSNNN 格式，17位)
-      const txStartTime = curYearMonDay + time1;
+      // ================================================================
+      // 【决策】根据用户是否配置检查表，选择预发送或直接流程
+      // ================================================================
+      const userConfiguredTables = tables.filter(t => t.name).map(t => t.name);
+      let effectiveTables = [];
 
-      // 生成全局业务跟踪号 (32位)
-      const globalBusiTrackNo =
-        txStartTime +
-        '1022199' +
-        'CK001' +
-        Math.floor(Math.random() * 1000)
-          .toString()
-          .padStart(3, '0');
+      if (userConfiguredTables.length > 0) {
+        // 用户已配置检查表，直接使用，跳过预发送流程
+        effectiveTables = userConfiguredTables;
+        addLog(`用户已配置 ${effectiveTables.length} 个检查表，跳过预发送流程`);
+        addLog(`检查表: ${effectiveTables.join(', ')}`);
+      } else {
+        // 用户未配置检查表，执行预发送获取目标表名
+        addLog('未配置检查表，执行预发送流程获取目标表名...');
 
-      // 更新请求报文中的字段
-      if (requestData.txHeader) {
-        requestData.txHeader.globalBusiTrackNo = globalBusiTrackNo;
-        requestData.txHeader.subtxNo = subtxNo;
-        requestData.txHeader.txStartTime = txStartTime;
-        requestData.txHeader.txSendTime = txStartTime;
+        // ================================================================
+        // 【第一次发送】预发送报文（携带 txEmb，用于触发前置异常场景）
+        // ================================================================
+        addLog('--- 【预发送】构造携带 txEmb 的报文 ---');
+        const preRequestData = JSON.parse(JSON.stringify(requestData));
+        applyDynamicFields(preRequestData);
+        preRequestData.txEmb = { afterException: 'YRC000035' };
+        addLog(`[预发送] 动态字段已生成，globalBusiTrackNo=${preRequestData.txHeader?.globalBusiTrackNo}`);
 
-        // 处理tenantId字段
-        if (selectedEnvironment === 'TEST') {
-          requestData.txHeader.tenantId = 'QHGD';
-        } else if (selectedEnvironment === 'PREPROD') {
-          requestData.txHeader.tenantId = 'PROD';
-        } else {
-          requestData.txHeader.tenantId = selectedEnvironment;
+        try {
+          await applyMac(preRequestData, '预发送');
+        } catch (macErr) {
+          addLog(`[预发送] MAC获取失败: ${macErr.message}`, 'ERROR');
+          throw new Error(`[预发送] MAC请求失败: ${macErr.message}`);
         }
 
-        addLog('请求报文字段处理完成');
-        addLog(`tenantId已设置为: ${requestData.txHeader.tenantId}`);
+        addLog(`[预发送] 发送报文到: ${apiUrl}`);
+        let preApiResponse = null;
+        try {
+          const preResp = await axios.post(apiUrl, preRequestData);
+          preApiResponse = preResp.data;
+          addLog(`[预发送] 响应成功: ${JSON.stringify(preApiResponse)}`);
+        } catch (preErr) {
+          if (preErr.response) {
+            preApiResponse = preErr.response.data;
+            addLog(`[预发送] 响应数据（非2xx）: ${JSON.stringify(preApiResponse)}`, 'WARN');
+          } else {
+            addLog(`[预发送] 请求异常: ${preErr.message}`, 'WARN');
+          }
+        }
+        addLog('--- 【预发送】完成 ---');
+
+        // 【预发送结果校验】检查 servRespCd 是否符合预期
+        const EXPECTED_SERV_RESP_CD = 'Y1022199RC000035';
+        const actualServRespCd = preApiResponse?.txHeader?.servRespCd;
+
+        if (actualServRespCd !== EXPECTED_SERV_RESP_CD) {
+          addLog(`[预发送校验] servRespCd 不符合预期`, 'ERROR');
+          addLog(`  预期值: ${EXPECTED_SERV_RESP_CD}`, 'ERROR');
+          addLog(`  实际值: ${actualServRespCd ?? '(未返回)'}`, 'ERROR');
+          addLog('预发送结果不符合预期，终止后续 SQL 查询与比对', 'ERROR');
+          return;
+        }
+        addLog(`[预发送校验] servRespCd 符合预期: ${actualServRespCd} ✓`);
+
+        // 调用 tranSqlQry 接口，根据预发送流水号查询对应 SQL
+        const preGlo = preRequestData.txHeader?.globalBusiTrackNo;
+        const routeOrigin = (() => { try { return new URL(apiSettings.route_url).origin; } catch { return ''; } })();
+        const tranSqlQryUrl = `${routeOrigin}/testtool/tranSqlQry`;
+        addLog(`[tranSqlQry] 查询接口: ${tranSqlQryUrl}`);
+        addLog(`[tranSqlQry] 流水号 glo: ${preGlo}`);
+        try {
+          const tranResp = await axios.post(tranSqlQryUrl, { glo: preGlo }, { headers: { 'Content-Type': 'application/json;charset=UTF-8' } });
+          const tranData = tranResp.data;
+          if (tranData?.code === 200 && tranData?.data) {
+            let parsedSqlData;
+            try {
+              parsedSqlData = typeof tranData.data === 'string' ? JSON.parse(tranData.data) : tranData.data;
+            } catch {
+              addLog('[tranSqlQry] 解析响应 data 字段失败', 'WARN');
+              parsedSqlData = {};
+            }
+            const sqlArray = parsedSqlData.sqlList || [];
+            const splitIdx = sqlArray.findIndex(sql => sql.includes('COMPENSATION_SPLIT_LINE'));
+            const normalSqls = splitIdx !== -1 ? sqlArray.slice(0, splitIdx) : sqlArray;
+
+            const extractTableName = (sql) => {
+              const s = sql.trim();
+              const insertMatch = s.match(/^\s*INSERT\s+(?:INTO\s+)?([`"[\w.]+[\w`"\]]+)/i);
+              if (insertMatch) return insertMatch[1].replace(/[`"[\]]/g, '').split('.').pop();
+              const updateMatch = s.match(/^\s*UPDATE\s+([`"[\w.]+[\w`"\]]+)/i);
+              if (updateMatch) return updateMatch[1].replace(/[`"[\]]/g, '').split('.').pop();
+              const deleteMatch = s.match(/^\s*DELETE\s+FROM\s+([`"[\w.]+[\w`"\]]+)/i);
+              if (deleteMatch) return deleteMatch[1].replace(/[`"[\]]/g, '').split('.').pop();
+              const mergeMatch = s.match(/^\s*MERGE\s+INTO\s+([`"[\w.]+[\w`"\]]+)/i);
+              if (mergeMatch) return mergeMatch[1].replace(/[`"[\]]/g, '').split('.').pop();
+              return null;
+            };
+            // 去除分表号后缀，去重
+            const stripShardSuffix = (name) => name.replace(/_\d+$/, '');
+            const nonSelectSqls = normalSqls.filter(sql => !/^\s*SELECT\s/i.test(sql.trim()));
+            const rawNames = nonSelectSqls.map(extractTableName).filter(Boolean);
+            const strippedNames = [...new Set(rawNames.map(stripShardSuffix))];
+
+            if (splitIdx !== -1) {
+              addLog(`[tranSqlQry] 查询成功，正常SQL ${normalSqls.length} 条，补偿SQL ${sqlArray.length - splitIdx - 1} 条（已忽略）`);
+            } else {
+              addLog(`[tranSqlQry] 查询成功，共 ${normalSqls.length} 条正常SQL`);
+            }
+
+            if (strippedNames.length > 0) {
+              addLog(`[tranSqlQry] 匹配到表名（共 ${strippedNames.length} 个）: ${strippedNames.join(', ')}`);
+              effectiveTables = strippedNames;
+            } else {
+              addLog('[tranSqlQry] 正常SQL中未找到非SELECT语句', 'WARN');
+            }
+          } else {
+            addLog(`[tranSqlQry] 查询失败: ${tranData?.msg || '未知错误'}`, 'WARN');
+          }
+        } catch (tranErr) {
+          addLog(`[tranSqlQry] 接口调用失败: ${tranErr.message}`, 'ERROR');
+        }
+
+        if (effectiveTables.length === 0) {
+          addLog('[tranSqlQry] 未能提取到任何有效检查表，将跳过 SQL 前后比对，仅执行正式报文发送', 'WARN');
+        }
       }
 
-      // 调用mac_url获取msgrptMac值（若mac_url为空则跳过）
-      const macUrl = apiSettings[selectedEnvironment]?.mac_url;
-      if (!macUrl) {
-        addLog('mac_url未配置或为空，跳过MAC获取步骤', 'INFO');
-      } else {
-        addLog('调用mac_url获取msgrptMac值...');
-        addLog(`mac_url地址: ${macUrl}`);
-        try {
-          const macResponse = await axios.post(macUrl, requestData);
-          const msgrptMac = macResponse.data;
+      // ================================================================
+      // 【正式发送前】为正式报文重新生成动态字段 + MAC（不含 txEmb）
+      // ================================================================
+      addLog('处理正式请求报文中的字段...');
+      applyDynamicFields(requestData);
+      addLog(`正式报文动态字段已生成，globalBusiTrackNo=${requestData.txHeader?.globalBusiTrackNo}`);
+      addLog(`tenantId已设置为: ${requestData.txHeader?.tenantId}`);
 
-          if (!msgrptMac || typeof msgrptMac !== 'string') {
-            addLog('错误: mac_url返回的值不是有效字符串', 'ERROR');
-            throw new Error('mac_url返回的值不是有效字符串');
-          }
-
-          // 替换msgrptMac字段
-          if (requestData.txHeader) {
-            requestData.txHeader.msgrptMac = msgrptMac;
-            addLog(`msgrptMac替换成功: ${msgrptMac}`);
-          }
-        } catch (macError) {
-          addLog(`错误: mac_url请求失败: ${macError.message}`, 'ERROR');
-          throw new Error(`mac_url请求失败: ${macError.message}`);
-        }
+      try {
+        await applyMac(requestData, '正式发送');
+      } catch (macErr) {
+        addLog(`错误: mac_url请求失败: ${macErr.message}`, 'ERROR');
+        throw new Error(`mac_url请求失败: ${macErr.message}`);
       }
 
       let routingKey = null;
@@ -752,21 +849,21 @@ function App() {
 
       addLog('开始提取各表的查询条件...');
       const tableConditions = {};
-      
+      const skippedTables = [];
+
       // 只提取来源为 request / route 的初始条件（非表依赖条件），
       // 表依赖条件（source=table）由后端在顺序查询时动态填充。
-      for (const table of tables) {
-        if (table.name) {
-          try {
-            let config = systemSettings.tables[table.name];
-            if (!config) {
-              config = defaultTableSettings.tables[table.name];
-              if (!config) {
-                addLog(`警告: 表 ${table.name} 没有配置查询条件，也没有默认配置`, 'WARN');
-                tableConditions[table.name] = {};
-                continue;
-              }
-            }
+      for (const tableName of effectiveTables) {
+        try {
+          let config = systemSettings.tables[tableName];
+          if (!config) config = defaultTableSettings.tables[tableName];
+          if (!config) {
+            addLog(`警告: 表 ${tableName} 没有配置查询条件，跳过该表的比对检查`, 'WARN');
+            skippedTables.push(tableName);
+            continue;
+          }
+          {
+            const table = { name: tableName };
             const conditions = {};
             for (const cond of config.conditionFields) {
               if (cond.source === 'table') {
@@ -849,12 +946,12 @@ function App() {
                 addLog(`  错误: 必填字段 ${cond.field} 无法提取值`, 'ERROR');
               }
             }
-            tableConditions[table.name] = conditions;
-            addLog(`  表 ${table.name} 初始条件: ${JSON.stringify(conditions)}`);
-          } catch (condError) {
-            addLog(`提取表 ${table.name} 查询条件失败: ${condError.message}`, 'ERROR');
-            tableConditions[table.name] = {};
+            tableConditions[tableName] = conditions;
+            addLog(`  表 ${tableName} 初始条件: ${JSON.stringify(conditions)}`);
           }
+        } catch (condError) {
+          addLog(`提取表 ${tableName} 查询条件失败: ${condError.message}`, 'ERROR');
+          tableConditions[tableName] = {};
         }
       }
 
@@ -878,11 +975,25 @@ function App() {
         }
       }
 
-      addLog('通过本地 Node.js 进程执行数据一致性检查...');
+      // addLog('通过本地 Node.js 进程执行数据一致性检查...');
+      const tablesToCheck = effectiveTables.filter(t => !skippedTables.includes(t));
+      if (tablesToCheck.length === 0) {
+        addLog('无需执行 SQL 比对：所有检查表均已跳过或未获取到有效表名', 'WARN');
+        const skippedResults = skippedTables.map(tableName => ({
+          table: tableName,
+          status: '跳过',
+          message: '未配置查询条件，已跳过比对检查',
+          details: { before: { count: 0, sql: '', data: [] }, after: { count: 0, sql: '', data: [] } }
+        }));
+        if (skippedResults.length > 0) {
+          setResults(skippedResults);
+          setTimeout(() => setActiveTab('result'), 800);
+        }
+      } else {
       try {
         const requestPayload = {
           apiResponse: apiResponse,
-          tables: tables.filter(t => t.name).map(t => t.name),
+          tables: tablesToCheck,
           requestData: requestData,
           routingKey: routingKey,
           tableConditions: tableConditions,
@@ -895,7 +1006,7 @@ function App() {
         let checkData;
 
         if (electronAPI) {
-          addLog('检测到 桌面环境，通过主进程启动本地 Node.js 检查...', 'INFO');
+          // addLog('检测到 桌面环境，通过主进程启动本地 Node.js 检查...', 'INFO');
           try {
             checkData = await electronAPI.runNodeCheck(requestPayload);
           } catch (err) {
@@ -929,12 +1040,20 @@ function App() {
           }
         }));
 
-        setResults(backendResults);
+        const skippedResults = skippedTables.map(tableName => ({
+          table: tableName,
+          status: '跳过',
+          message: '未配置查询条件，已跳过比对检查',
+          details: { before: { count: 0, sql: '', data: [] }, after: { count: 0, sql: '', data: [] } }
+        }));
+
+        setResults([...backendResults, ...skippedResults]);
         addLog('断言结果已生成');
         setTimeout(() => setActiveTab('result'), 800);
       } catch (err) {
         addLog(`数据库连接失败: ${err.message}`, 'ERROR');
         throw err;
+      }
       }
     } catch (err) {
       addLog(`执行失败: ${err.message}`, 'ERROR');
@@ -1018,6 +1137,7 @@ function App() {
   const getStatusIcon = (status) => {
     if (status === '通过') return '✓';
     if (status === '失败') return '✗';
+    if (status === '跳过') return '⊘';
     return '!';
   };
 
@@ -2320,10 +2440,10 @@ function App() {
               ) : (
                 <div className="result-list">
                   {results.map((result, index) => (
-                    <div key={index} className={`result-card ${result.status === '通过' ? 'result-pass' : 'result-fail'}`}>
+                    <div key={index} className={`result-card ${result.status === '通过' ? 'result-pass' : result.status === '跳过' ? 'result-skip' : 'result-fail'}`}>
                       <div className="result-top">
                         <div className="result-info">
-                          <span className={`status-badge ${result.status === '通过' ? 'badge-pass' : 'badge-fail'}`}>
+                          <span className={`status-badge ${result.status === '通过' ? 'badge-pass' : result.status === '跳过' ? 'badge-skip' : 'badge-fail'}`}>
                             {getStatusIcon(result.status)} {result.status}
                           </span>
                           <span className="result-table-name">{result.table}</span>
