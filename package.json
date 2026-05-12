@@ -51,7 +51,7 @@
       "public/**/*",
       "backend/**/*"
     ],
-    "asar": false,
+    "asar": true,
     "mac": {
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
@@ -70,9 +70,7 @@
         {
           "target": "nsis",
           "arch": [
-            "x64",
-            "arm64",
-            "ia32"
+            "x64"
           ]
         }
       ]
