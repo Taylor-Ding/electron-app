@@ -80,7 +80,7 @@ function App() {
     }
   }, null, 2));
   const [responseBody, setResponseBody] = useState('');
-  const [tables, setTables] = useState([{ name: 'tb_dpmst_medium' }]);
+  const [tables, setTables] = useState([]);
   const [results, setResults] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
@@ -538,7 +538,7 @@ function App() {
                 addLog(`  调用路由查询接口: ${routeUrl}`);
                 addLog(`  查询参数: mediumNo = ${mediumNoToQuery}`);
                 
-                const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery } });
+                const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery }, headers: { env: selectedEnvironment } });
                 
                 let respData = routeResponse.data;
                 value = null;
@@ -801,7 +801,7 @@ function App() {
                       const routeUrl = apiSettings.route_url;
                       if (!routeUrl) throw new Error('路由服务器地址(route_url)未配置，请在API设置中填写');
                       addLog(`  调用路由查询接口: ${routeUrl}`);
-                      const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery } });
+                      const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery }, headers: { env: selectedEnvironment } });
                       let respData = routeResponse.data;
                       if (respData && respData.code === 200 && respData.data) {
                         try {
@@ -2222,9 +2222,7 @@ function App() {
                     placeholder="表名"
                     className="input table-input"
                   />
-                  {tables.length > 1 && (
-                    <button onClick={() => removeTable(index)} className="btn-icon btn-danger" title="移除">×</button>
-                  )}
+                  <button onClick={() => removeTable(index)} className="btn-icon btn-danger" title="移除">×</button>
                 </div>
               ))}
             </div>
