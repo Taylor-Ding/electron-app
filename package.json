@@ -1,7 +1,7 @@
 {
   "name": "api_post_solo",
   "private": true,
-  "version": "1.0.23",
+  "version": "1.0.24",
   "main": "main.js",
   "type": "module",
   "description": "API Post Solo - 数据一致性自动化核对工具",
@@ -49,9 +49,10 @@
       "preload.cjs",
       "dist/**/*",
       "public/**/*",
-      "backend/**/*"
+      "backend/**/*",
+      "node_modules/**/*"
     ],
-    "asar": true,
+    "asar": false,
     "mac": {
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
