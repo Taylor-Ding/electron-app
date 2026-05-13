@@ -19,8 +19,8 @@ function App() {
   const [loginError, setLoginError] = useState('');
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [authApiBaseUrl, setAuthApiBaseUrl] = useState(() => {
-    if (typeof window === 'undefined') return 'http://localhost:8080/prod-api';
-    return localStorage.getItem('authApiBaseUrl') || 'http://localhost:8080/prod-api';
+    if (typeof window === 'undefined') return 'http://localhost:8080/online-service';
+    return localStorage.getItem('authApiBaseUrl') || 'http://localhost:8080/online-service';
   });
   const [captchaSrc, setCaptchaSrc] = useState('');
   const [captchaUuid, setCaptchaUuid] = useState('');
@@ -317,7 +317,7 @@ function App() {
         },
         {
           timeout: 30000,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 'Content-Type': 'application/json', 'X-Client-Type': 'DESKTOP' }
         }
       );
 
@@ -538,7 +538,7 @@ function App() {
                 addLog(`  调用路由查询接口: ${routeUrl}`);
                 addLog(`  查询参数: mediumNo = ${mediumNoToQuery}`);
                 
-                const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery }, headers: { env: selectedEnvironment } });
+                const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery }, headers: { env: selectedEnvironment, 'X-Client-Type': 'DESKTOP' } });
                 
                 let respData = routeResponse.data;
                 value = null;
@@ -768,7 +768,7 @@ function App() {
         addLog(`[tranSqlQry] 查询接口: ${tranSqlQryUrl}`);
         addLog(`[tranSqlQry] 流水号 glo: ${preGlo}`);
         try {
-          const tranResp = await axios.post(tranSqlQryUrl, { glo: preGlo }, { headers: { 'Content-Type': 'application/json;charset=UTF-8' } });
+          const tranResp = await axios.post(tranSqlQryUrl, { glo: preGlo }, { headers: { 'Content-Type': 'application/json;charset=UTF-8', 'X-Client-Type': 'DESKTOP' } });
           const tranData = tranResp.data;
           if (tranData?.code === 200 && tranData?.data) {
             let parsedSqlData;
@@ -898,7 +898,7 @@ function App() {
                       const routeUrl = apiSettings.route_url;
                       if (!routeUrl) throw new Error('路由服务器地址(route_url)未配置，请在API设置中填写');
                       addLog(`  调用路由查询接口: ${routeUrl}`);
-                      const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery }, headers: { env: selectedEnvironment } });
+                      const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery }, headers: { env: selectedEnvironment, 'X-Client-Type': 'DESKTOP' } });
                       let respData = routeResponse.data;
                       if (respData && respData.code === 200 && respData.data) {
                         try {
