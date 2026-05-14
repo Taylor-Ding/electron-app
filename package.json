@@ -1,10 +1,10 @@
 {
   "name": "api_post_solo",
   "private": true,
-  "version": "1.0.25",
+  "version": "1.0.26",
   "main": "main.js",
   "type": "module",
-  "description": "API Post Solo - 数据一致性自动化核对工具",
+  "description": "api_post_solo - 数据一致性自动化核对工具",
   "author": "Taylor Ding <taylor.ding@example.com>",
   "homepage": "https://github.com/Taylor-Ding/electron-app",
   "scripts": {
@@ -20,7 +20,8 @@
     "axios": "^1.15.0",
     "pg": "^8.20.0",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "sqlite3": "^6.0.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
@@ -54,6 +55,7 @@
     ],
     "asar": false,
     "mac": {
+      "icon": "build/icon.png",
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
       "target": [
@@ -67,6 +69,7 @@
       ]
     },
     "win": {
+      "icon": "build/icon.png",
       "target": [
         {
           "target": "nsis",
@@ -77,6 +80,7 @@
       ]
     },
     "linux": {
+      "icon": "build/icon.png",
       "target": [
         {
           "target": "AppImage",

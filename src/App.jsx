@@ -18,10 +18,7 @@ function App() {
   });
   const [loginError, setLoginError] = useState('');
   const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [authApiBaseUrl, setAuthApiBaseUrl] = useState(() => {
-    if (typeof window === 'undefined') return 'http://localhost:8080/online-service';
-    return localStorage.getItem('authApiBaseUrl') || 'http://localhost:8080/online-service';
-  });
+  const [authApiBaseUrl, setAuthApiBaseUrl] = useState('http://localhost:8080/online-service');
   const [captchaSrc, setCaptchaSrc] = useState('');
   const [captchaUuid, setCaptchaUuid] = useState('');
   const [captchaLoading, setCaptchaLoading] = useState(false);
@@ -98,10 +95,7 @@ function App() {
   const [tableSearchQuery, setTableSearchQuery] = useState('');
   const [defaultTableSearchQuery, setDefaultTableSearchQuery] = useState('');
   const [defaultTableSettings, setDefaultTableSettings] = useState({ tables: {} });
-  const [isDarkMode, setIsDarkMode] = useState(() => {
-    const saved = localStorage.getItem('themeMode');
-    return saved !== null ? saved === 'dark' : true;
-  });
+  const [isDarkMode, setIsDarkMode] = useState(true);
   const [showJmxPicker, setShowJmxPicker] = useState(false);
   const [jmxRequests, setJmxRequests] = useState([]);
   const logsRef = useRef(null);
@@ -272,7 +266,9 @@ function App() {
   }, [authApiBaseUrl]);
 
   useEffect(() => {
-    localStorage.setItem('authApiBaseUrl', authApiBaseUrl);
+    if (window.electronAPI) {
+      window.electronAPI.setConfig('authApiBaseUrl', authApiBaseUrl);
+    }
   }, [authApiBaseUrl]);
 
   useEffect(() => {
@@ -416,7 +412,7 @@ function App() {
       }
       const merged = { ...(apiSettingsRef.current || {}), ...patch };
       setApiSettings(merged);
-      localStorage.setItem('apiSettings', JSON.stringify(merged));
+      if (window.electronAPI) window.electronAPI.setConfig('apiSettings', JSON.stringify(merged));
 
       setApiStatus('success');
       setApiStatusMsg('就绪');
@@ -485,15 +481,11 @@ function App() {
 
   const extractConditions = async (requestData, tableName, routingKey, tableResults = {}) => {
     addLog(`提取表 ${tableName} 的查询条件...`);
-    let config = systemSettings.tables[tableName];
+    const mergedTables = { ...defaultTableSettings.tables, ...systemSettings.tables };
+    const config = mergedTables[tableName];
     if (!config) {
-      config = defaultTableSettings.tables[tableName];
-      if (config) {
-        addLog(`提示: 表 ${tableName} 未自定义规则，使用默认配置规则`);
-      } else {
-        addLog(`警告: 表 ${tableName} 没有配置查询条件，也没有默认配置`, 'WARN');
-        return {};
-      }
+      addLog(`警告: 表 ${tableName} 没有配置查询条件，也没有默认配置`, 'WARN');
+      return {};
     }
 
     addLog(`  主键: ${config.primaryKey}`);
@@ -714,59 +706,51 @@ function App() {
         addLog(`检查表: ${effectiveTables.join(', ')}`);
       } else {
         // 用户未配置检查表，执行预发送获取目标表名
-        addLog('未配置检查表，执行预发送流程获取目标表名...');
-
-        // ================================================================
-        // 【第一次发送】预发送报文（携带 txEmb，用于触发前置异常场景）
-        // ================================================================
-        addLog('--- 【预发送】构造携带 txEmb 的报文 ---');
+        addLog('预发送 · 自动发现检查表', 'PHASE');
         const preRequestData = JSON.parse(JSON.stringify(requestData));
         applyDynamicFields(preRequestData);
         preRequestData.txEmb = { afterException: 'YRC000035' };
-        addLog(`[预发送] 动态字段已生成，globalBusiTrackNo=${preRequestData.txHeader?.globalBusiTrackNo}`);
+        addLog(`globalBusiTrackNo: ${preRequestData.txHeader?.globalBusiTrackNo}`);
 
         try {
           await applyMac(preRequestData, '预发送');
         } catch (macErr) {
-          addLog(`[预发送] MAC获取失败: ${macErr.message}`, 'ERROR');
+          addLog(`MAC获取失败: ${macErr.message}`, 'ERROR');
           throw new Error(`[预发送] MAC请求失败: ${macErr.message}`);
         }
 
-        addLog(`[预发送] 发送报文到: ${apiUrl}`);
+        addLog(`发送预请求 → ${apiUrl}`);
         let preApiResponse = null;
         try {
           const preResp = await axios.post(apiUrl, preRequestData);
           preApiResponse = preResp.data;
-          addLog(`[预发送] 响应成功: ${JSON.stringify(preApiResponse)}`);
+          addLog('预请求响应成功');
         } catch (preErr) {
           if (preErr.response) {
             preApiResponse = preErr.response.data;
-            addLog(`[预发送] 响应数据（非2xx）: ${JSON.stringify(preApiResponse)}`, 'WARN');
+            addLog(`预请求响应非2xx: ${JSON.stringify(preApiResponse)}`, 'WARN');
           } else {
-            addLog(`[预发送] 请求异常: ${preErr.message}`, 'WARN');
+            addLog(`预请求异常: ${preErr.message}`, 'WARN');
           }
         }
-        addLog('--- 【预发送】完成 ---');
 
         // 【预发送结果校验】检查 servRespCd 是否符合预期
         const EXPECTED_SERV_RESP_CD = 'Y1022199RC000035';
         const actualServRespCd = preApiResponse?.txHeader?.servRespCd;
 
         if (actualServRespCd !== EXPECTED_SERV_RESP_CD) {
-          addLog(`[预发送校验] servRespCd 不符合预期`, 'ERROR');
-          addLog(`  预期值: ${EXPECTED_SERV_RESP_CD}`, 'ERROR');
-          addLog(`  实际值: ${actualServRespCd ?? '(未返回)'}`, 'ERROR');
+          addLog(`servRespCd 校验失败 — 预期: ${EXPECTED_SERV_RESP_CD}  实际: ${actualServRespCd ?? '(未返回)'}`, 'ERROR');
           addLog('预发送结果不符合预期，终止后续 SQL 查询与比对', 'ERROR');
           return;
         }
-        addLog(`[预发送校验] servRespCd 符合预期: ${actualServRespCd} ✓`);
+        addLog(`servRespCd 校验通过 ✓ ${actualServRespCd}`);
 
         // 调用 tranSqlQry 接口，根据预发送流水号查询对应 SQL
+        addLog('tranSqlQry · 查询预发送涉及的 SQL', 'PHASE');
         const preGlo = preRequestData.txHeader?.globalBusiTrackNo;
         const routeOrigin = (() => { try { return new URL(apiSettings.route_url).origin; } catch { return ''; } })();
         const tranSqlQryUrl = `${routeOrigin}/testtool/tranSqlQry`;
-        addLog(`[tranSqlQry] 查询接口: ${tranSqlQryUrl}`);
-        addLog(`[tranSqlQry] 流水号 glo: ${preGlo}`);
+        addLog(`globalBusiTrackNo: ${preGlo}  →  ${tranSqlQryUrl}`);
         try {
           const tranResp = await axios.post(tranSqlQryUrl, { glo: preGlo }, { headers: { 'Content-Type': 'application/json;charset=UTF-8', 'X-Client-Type': 'DESKTOP' } });
           const tranData = tranResp.data;
@@ -775,7 +759,7 @@ function App() {
             try {
               parsedSqlData = typeof tranData.data === 'string' ? JSON.parse(tranData.data) : tranData.data;
             } catch {
-              addLog('[tranSqlQry] 解析响应 data 字段失败', 'WARN');
+              addLog('解析响应 data 字段失败', 'WARN');
               parsedSqlData = {};
             }
             const sqlArray = parsedSqlData.sqlList || [];
@@ -800,42 +784,38 @@ function App() {
             const rawNames = nonSelectSqls.map(extractTableName).filter(Boolean);
             const strippedNames = [...new Set(rawNames.map(stripShardSuffix))];
 
-            if (splitIdx !== -1) {
-              addLog(`[tranSqlQry] 查询成功，正常SQL ${normalSqls.length} 条，补偿SQL ${sqlArray.length - splitIdx - 1} 条（已忽略）`);
-            } else {
-              addLog(`[tranSqlQry] 查询成功，共 ${normalSqls.length} 条正常SQL`);
-            }
+            const compCount = splitIdx !== -1 ? sqlArray.length - splitIdx - 1 : 0;
+            addLog(`正常SQL ${normalSqls.length} 条${compCount > 0 ? `，补偿SQL ${compCount} 条（已忽略）` : ''}`);
 
             if (strippedNames.length > 0) {
-              addLog(`[tranSqlQry] 匹配到表名（共 ${strippedNames.length} 个）: ${strippedNames.join(', ')}`);
+              addLog(`发现检查表（${strippedNames.length} 个）: ${strippedNames.join(', ')}`);
               effectiveTables = strippedNames;
             } else {
-              addLog('[tranSqlQry] 正常SQL中未找到非SELECT语句', 'WARN');
+              addLog('正常SQL中未找到非SELECT语句', 'WARN');
             }
           } else {
-            addLog(`[tranSqlQry] 查询失败: ${tranData?.msg || '未知错误'}`, 'WARN');
+            addLog(`查询失败: ${tranData?.msg || '未知错误'}`, 'WARN');
           }
         } catch (tranErr) {
-          addLog(`[tranSqlQry] 接口调用失败: ${tranErr.message}`, 'ERROR');
+          addLog(`接口调用失败: ${tranErr.message}`, 'ERROR');
         }
 
         if (effectiveTables.length === 0) {
-          addLog('[tranSqlQry] 未能提取到任何有效检查表，将跳过 SQL 前后比对，仅执行正式报文发送', 'WARN');
+          addLog('未能提取到有效检查表，跳过 SQL 比对，仅执行正式发送', 'WARN');
         }
       }
 
       // ================================================================
       // 【正式发送前】为正式报文重新生成动态字段 + MAC（不含 txEmb）
       // ================================================================
-      addLog('处理正式请求报文中的字段...');
+      addLog('正式报文准备 · 生成动态字段 + MAC', 'PHASE');
       applyDynamicFields(requestData);
-      addLog(`正式报文动态字段已生成，globalBusiTrackNo=${requestData.txHeader?.globalBusiTrackNo}`);
-      addLog(`tenantId已设置为: ${requestData.txHeader?.tenantId}`);
+      addLog(`glo: ${requestData.txHeader?.globalBusiTrackNo}  tenantId: ${requestData.txHeader?.tenantId}`);
 
       try {
         await applyMac(requestData, '正式发送');
       } catch (macErr) {
-        addLog(`错误: mac_url请求失败: ${macErr.message}`, 'ERROR');
+        addLog(`mac_url请求失败: ${macErr.message}`, 'ERROR');
         throw new Error(`mac_url请求失败: ${macErr.message}`);
       }
 
@@ -843,11 +823,11 @@ function App() {
       try {
         routingKey = parseMainMapElement(requestData);
       } catch (parseError) {
-        addLog(`解析mainMapElemntInfo字段失败: ${parseError.message}`, 'ERROR');
+        addLog(`解析mainMapElemntInfo失败: ${parseError.message}`, 'ERROR');
         throw parseError;
       }
 
-      addLog('开始提取各表的查询条件...');
+      addLog('条件提取 · 为各检查表构建查询条件', 'PHASE');
       const tableConditions = {};
       const skippedTables = [];
 
@@ -855,10 +835,10 @@ function App() {
       // 表依赖条件（source=table）由后端在顺序查询时动态填充。
       for (const tableName of effectiveTables) {
         try {
-          let config = systemSettings.tables[tableName];
-          if (!config) config = defaultTableSettings.tables[tableName];
+          const mergedTables = { ...defaultTableSettings.tables, ...systemSettings.tables };
+          const config = mergedTables[tableName];
           if (!config) {
-            addLog(`警告: 表 ${tableName} 没有配置查询条件，跳过该表的比对检查`, 'WARN');
+            addLog(`[${tableName}] 未配置查询条件，跳过`, 'WARN');
             skippedTables.push(tableName);
             continue;
           }
@@ -868,36 +848,31 @@ function App() {
             for (const cond of config.conditionFields) {
               if (cond.source === 'table') {
                 // 跳过表依赖条件，交由后端处理
-                addLog(`  跳过表依赖条件 ${cond.field}（将由后端从依赖表结果中提取）`);
                 continue;
               }
               let value = null;
               if (cond.source === 'request') {
                 value = extractValue(requestData, cond.path);
-                if (value) addLog(`  从请求报文提取 ${cond.field}: ${value}`);
+                if (value) addLog(`[${tableName}] ${cond.field} = ${value}  (来自请求报文)`);
               } else if (cond.source === 'route') {
                 if (cond.field === 'cust_no' || cond.field === 'zone_val') {
                   let mediumNoToQuery = null;
                   if (cond.path) {
                     mediumNoToQuery = extractValue(requestData, cond.path);
-                    if (mediumNoToQuery) {
-                      addLog(`  从报文路径 ${cond.path} 提取到介质号: ${mediumNoToQuery}`);
-                    } else {
-                      addLog(`  警告: 无法从报文路径 ${cond.path} 提取到介质号`, 'WARN');
+                    if (!mediumNoToQuery) {
+                      addLog(`[${tableName}] 警告: 无法从 ${cond.path} 提取介质号`, 'WARN');
                     }
                   }
                   
                   if (!mediumNoToQuery && routingKey && routingKey.type === 'medium_no') {
                     mediumNoToQuery = routingKey.value;
-                    addLog(`  使用默认路由键提取介质号: ${mediumNoToQuery}`);
                   }
 
                   if (mediumNoToQuery) {
-                    addLog(`  调用路由服务器routeQuery接口获取cust_no`);
                     try {
                       const routeUrl = apiSettings.route_url;
-                      if (!routeUrl) throw new Error('路由服务器地址(route_url)未配置，请在API设置中填写');
-                      addLog(`  调用路由查询接口: ${routeUrl}`);
+                      if (!routeUrl) throw new Error('route_url 未配置');
+                      addLog(`[${tableName}] 路由查询 mediumNo=${mediumNoToQuery}  →  ${routeUrl}`);
                       const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery }, headers: { env: selectedEnvironment, 'X-Client-Type': 'DESKTOP' } });
                       let respData = routeResponse.data;
                       if (respData && respData.code === 200 && respData.data) {
@@ -909,7 +884,7 @@ function App() {
                             value = parsedData.zoneVal !== undefined ? parsedData.zoneVal : (parsedData.zone_val !== undefined ? parsedData.zone_val : (parsedData.custNo !== undefined ? parsedData.custNo : parsedData.cust_no));
                           }
                         } catch (e) {
-                          addLog(`  警告: 尝试解析data字段为JSON失败: ${e.message}`, 'WARN');
+                          addLog(`[${tableName}] 解析路由响应失败: ${e.message}`, 'WARN');
                         }
                       }
                       
@@ -925,60 +900,59 @@ function App() {
                         value = String(value);
                       }
 
-                      if (!value || typeof value !== 'string') throw new Error(`路由查询返回数据异常或无法提取 ${cond.field}: ${JSON.stringify(routeResponse.data)}`);
-                      addLog(`  从路由查询获取 ${cond.field}: ${value}`);
+                      if (!value || typeof value !== 'string') throw new Error(`路由响应中无法提取 ${cond.field}: ${JSON.stringify(routeResponse.data)}`);
+                      addLog(`[${tableName}] ${cond.field} = ${value}  (来自路由查询)`);
                     } catch (error) {
-                      addLog(`  错误: 路由查询失败: ${error.message}`, 'ERROR');
+                      addLog(`[${tableName}] 路由查询失败: ${error.message}`, 'ERROR');
                     }
                   } else {
-                    addLog(`  错误: 无法获取介质号，跳过路由查询`, 'ERROR');
+                    addLog(`[${tableName}] 无法获取介质号，跳过路由查询`, 'ERROR');
                   }
                 } else {
                   if (routingKey) {
                     value = extractValue(routingKey, cond.path);
-                    if (value) addLog(`  从路由结果提取 ${cond.field}: ${value}`);
+                    if (value) addLog(`[${tableName}] ${cond.field} = ${value}  (来自路由键)`);
                   }
                 }
               }
               if (value !== null && value !== undefined) {
                 conditions[cond.field] = value;
               } else if (cond.required) {
-                addLog(`  错误: 必填字段 ${cond.field} 无法提取值`, 'ERROR');
+                addLog(`[${tableName}] 必填字段 ${cond.field} 无法提取`, 'ERROR');
               }
             }
             tableConditions[tableName] = conditions;
-            addLog(`  表 ${tableName} 初始条件: ${JSON.stringify(conditions)}`);
+            addLog(`[${tableName}] 查询条件就绪: ${JSON.stringify(conditions)}`);
           }
         } catch (condError) {
-          addLog(`提取表 ${tableName} 查询条件失败: ${condError.message}`, 'ERROR');
+          addLog(`[${tableName}] 条件提取失败: ${condError.message}`, 'ERROR');
           tableConditions[tableName] = {};
         }
       }
 
-      addLog(`当前环境: ${selectedEnvironment}`);
-      addLog(`调用用户配置的API地址获取响应: ${apiUrl}`);
-      let apiResponse = null;
-      try {
-        const apiResponseData = await axios.post(apiUrl, requestData);
-        apiResponse = apiResponseData.data;
-        addLog('API响应获取成功');
-        setResponseBody(JSON.stringify(apiResponse, null, 2));
-      } catch (apiError) {
-        addLog('API调用成功（已请求到地址）', 'INFO');
-        if (apiError.response) {
-          addLog(`响应数据: ${JSON.stringify(apiError.response.data)}`, 'INFO');
-          apiResponse = apiError.response.data;
-          setResponseBody(JSON.stringify(apiError.response.data, null, 2));
-        } else {
-          addLog(`请求信息: ${apiError.message}`, 'INFO');
-          setResponseBody(`{"error": "${apiError.message}"}`);
-        }
-      }
+      addLog(`环境: ${selectedEnvironment}  检查表: ${effectiveTables.join(', ') || '(无)'}`);
 
-      // addLog('通过本地 Node.js 进程执行数据一致性检查...');
+
       const tablesToCheck = effectiveTables.filter(t => !skippedTables.includes(t));
+
       if (tablesToCheck.length === 0) {
+        // 无可检查的表，直接发送正式接口并跳过 SQL 比对
         addLog('无需执行 SQL 比对：所有检查表均已跳过或未获取到有效表名', 'WARN');
+        addLog(`调用接口: ${apiUrl}`);
+        let apiResponse = null;
+        try {
+          const apiResponseData = await axios.post(apiUrl, requestData);
+          apiResponse = apiResponseData.data;
+          addLog('API响应获取成功');
+          setResponseBody(JSON.stringify(apiResponse, null, 2));
+        } catch (apiError) {
+          if (apiError.response) {
+            apiResponse = apiError.response.data;
+            setResponseBody(JSON.stringify(apiError.response.data, null, 2));
+          } else {
+            setResponseBody(`{"error": "${apiError.message}"}`);
+          }
+        }
         const skippedResults = skippedTables.map(tableName => ({
           table: tableName,
           status: '跳过',
@@ -990,70 +964,115 @@ function App() {
           setTimeout(() => setActiveTab('result'), 800);
         }
       } else {
-      try {
-        const requestPayload = {
-          apiResponse: apiResponse,
-          tables: tablesToCheck,
-          requestData: requestData,
-          routingKey: routingKey,
-          tableConditions: tableConditions,
-          // 传入表配置，让后端能处理跨表依赖条件（source=table）
-          tableSettings: { ...defaultTableSettings.tables, ...systemSettings.tables },
-          environment: selectedEnvironment,
-          dbSettings: dbSettings
-        };
+        try {
+          const basePayload = {
+            tables: tablesToCheck,
+            requestData: requestData,
+            routingKey: routingKey,
+            tableConditions: tableConditions,
+            tableSettings: { ...defaultTableSettings.tables, ...systemSettings.tables },
+            environment: selectedEnvironment,
+            dbSettings: dbSettings
+          };
 
-        let checkData;
+          // ── Step 1: 接口调用前 SQL 查询 ──────────────────────────────
+          addLog('接口请求前 · 前置 SQL 查询', 'PHASE');
+          let beforeCheckData;
+          if (electronAPI) {
+            try {
+              beforeCheckData = await electronAPI.runBeforeCheck(basePayload);
+            } catch (err) {
+              addLog(`前置 SQL 查询调用失败: ${err.message}`, 'ERROR');
+              throw err;
+            }
+          } else {
+            addLog('纯浏览器环境，回退到后台 HTTP 接口...', 'WARN');
+            const res = await axios.post('http://localhost:8000/api/before-check', basePayload);
+            beforeCheckData = res.data;
+          }
+          for (const log of (beforeCheckData?.logs || [])) {
+            addLog(log.message, log.level || 'INFO');
+          }
+          if (!beforeCheckData?.success) {
+            throw new Error(beforeCheckData?.error || '前置 SQL 查询失败，请查看执行日志');
+          }
+          addLog('接口请求前 · 前置查询完成 ✓', 'PHASE');
 
-        if (electronAPI) {
-          // addLog('检测到 桌面环境，通过主进程启动本地 Node.js 检查...', 'INFO');
+          // ── Step 2: 正式接口调用 ──────────────────────────────────────
+          addLog(`正式发送 · 调用接口`, 'PHASE');
+          addLog(`目标: ${apiUrl}`);
+          let apiResponse = null;
           try {
-            checkData = await electronAPI.runNodeCheck(requestPayload);
-          } catch (err) {
-            addLog(`主进程 Node.js 调用失败: ${err.message}`, 'ERROR');
-            throw err;
+            const apiResponseData = await axios.post(apiUrl, requestData);
+            apiResponse = apiResponseData.data;
+            addLog('API响应获取成功');
+            setResponseBody(JSON.stringify(apiResponse, null, 2));
+          } catch (apiError) {
+            addLog('API调用成功（已请求到地址）', 'INFO');
+            if (apiError.response) {
+              addLog(`响应数据: ${JSON.stringify(apiError.response.data)}`, 'INFO');
+              apiResponse = apiError.response.data;
+              setResponseBody(JSON.stringify(apiError.response.data, null, 2));
+            } else {
+              addLog(`请求信息: ${apiError.message}`, 'INFO');
+              setResponseBody(`{"error": "${apiError.message}"}`);
+            }
           }
-        } else {
-          // 浏览器环境 fallback
-          addLog('纯浏览器环境下无法唤起子进程，回退到后台 HTTP 接口...', 'WARN');
-          const res = await axios.post('http://localhost:8000/api/check', requestPayload);
-          checkData = res.data;
-        }
 
-        const responseLogs = checkData?.logs || [];
-        for (const log of responseLogs) {
-          addLog(log.message, log.level || 'INFO');
-        }
-
-        // 后端执行失败时，日志已输出，直接中断，不跳转标签页
-        if (!checkData?.success) {
-          throw new Error(checkData?.error || '后端执行失败，请查看执行日志');
-        }
-
-        const backendResults = (checkData?.results || []).map(result => ({
-          table: result.table,
-          status: result.status === '通过' ? '通过' : result.status === '失败' ? '失败' : '错误',
-          message: result.message,
-          details: {
-            before: { count: result.before?.count || 0, sql: result.before?.sql || '', data: result.before?.data || [] },
-            after: { count: result.after?.count || 0, sql: result.after?.sql || '', data: result.after?.data || [] }
+          // ── Step 3: 接口调用后 SQL 查询 + 比对 ───────────────────────
+          addLog('接口请求后 · 后置 SQL 查询 + 比对', 'PHASE');
+          let checkData;
+          if (electronAPI) {
+            try {
+              checkData = await electronAPI.runAfterCheck({
+                ...basePayload,
+                beforeData: beforeCheckData.beforeData,
+                apiResponse: apiResponse
+              });
+            } catch (err) {
+              addLog(`后置 SQL 查询调用失败: ${err.message}`, 'ERROR');
+              throw err;
+            }
+          } else {
+            addLog('纯浏览器环境，回退到后台 HTTP 接口...', 'WARN');
+            const res = await axios.post('http://localhost:8000/api/after-check', {
+              ...basePayload,
+              beforeData: beforeCheckData.beforeData,
+              apiResponse: apiResponse
+            });
+            checkData = res.data;
           }
-        }));
+          for (const log of (checkData?.logs || [])) {
+            addLog(log.message, log.level || 'INFO');
+          }
+          if (!checkData?.success) {
+            throw new Error(checkData?.error || '后置 SQL 查询失败，请查看执行日志');
+          }
 
-        const skippedResults = skippedTables.map(tableName => ({
-          table: tableName,
-          status: '跳过',
-          message: '未配置查询条件，已跳过比对检查',
-          details: { before: { count: 0, sql: '', data: [] }, after: { count: 0, sql: '', data: [] } }
-        }));
+          const backendResults = (checkData?.results || []).map(result => ({
+            table: result.table,
+            status: result.status === '通过' ? '通过' : result.status === '失败' ? '失败' : '错误',
+            message: result.message,
+            details: {
+              before: { count: result.before?.count || 0, sql: result.before?.sql || '', data: result.before?.data || [] },
+              after: { count: result.after?.count || 0, sql: result.after?.sql || '', data: result.after?.data || [] }
+            }
+          }));
 
-        setResults([...backendResults, ...skippedResults]);
-        addLog('断言结果已生成');
-        setTimeout(() => setActiveTab('result'), 800);
-      } catch (err) {
-        addLog(`数据库连接失败: ${err.message}`, 'ERROR');
-        throw err;
-      }
+          const skippedResults = skippedTables.map(tableName => ({
+            table: tableName,
+            status: '跳过',
+            message: '未配置查询条件，已跳过比对检查',
+            details: { before: { count: 0, sql: '', data: [] }, after: { count: 0, sql: '', data: [] } }
+          }));
+
+          setResults([...backendResults, ...skippedResults]);
+          addLog('断言结果已生成');
+          setTimeout(() => setActiveTab('result'), 800);
+        } catch (err) {
+          addLog(`数据库连接失败: ${err.message}`, 'ERROR');
+          throw err;
+        }
       }
     } catch (err) {
       addLog(`执行失败: ${err.message}`, 'ERROR');
@@ -1105,14 +1124,50 @@ function App() {
                   const bVal = beforeData[idx] ? beforeData[idx][field] : undefined;
                   const aVal = afterData[idx] ? afterData[idx][field] : undefined;
                   const isDiff = bVal !== aVal;
+                  const fmtVal = (v) => v === undefined
+                    ? <span style={{ opacity: 0.35 }}>—</span>
+                    : v === null
+                      ? <span style={{ fontStyle: 'italic', opacity: 0.45 }}>NULL</span>
+                      : String(v);
                   return (
-                    <tr key={field} style={{ borderBottom: '1px solid var(--border-color)', backgroundColor: isDiff ? 'rgba(255, 100, 100, 0.05)' : 'transparent' }}>
-                      <td style={{ padding: '10px 12px', fontWeight: '500', color: 'var(--text-primary)' }}>{field}</td>
-                      <td style={{ padding: '10px 12px', wordBreak: 'break-all', color: isDiff ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
-                        {bVal === undefined ? '-' : bVal === null ? <span style={{ color: '#aaa', fontStyle: 'italic' }}>NULL</span> : String(bVal)}
+                    <tr key={field} style={{
+                      borderBottom: isDiff ? '1px solid rgba(255,80,80,0.3)' : '1px solid var(--border-color)',
+                      backgroundColor: isDiff ? 'rgba(255,50,50,0.14)' : 'transparent',
+                      borderLeft: isDiff ? '4px solid #ff4040' : '4px solid transparent',
+                    }}>
+                      {/* 字段名 */}
+                      <td style={{ padding: '10px 12px', whiteSpace: 'nowrap', fontWeight: isDiff ? 700 : 500, color: isDiff ? '#ff5555' : 'var(--text-secondary)' }}>
+                        {isDiff && (
+                          <span style={{
+                            display: 'inline-block', marginRight: 7,
+                            padding: '1px 6px', borderRadius: 4,
+                            fontSize: 10, fontWeight: 800, lineHeight: 1.6,
+                            backgroundColor: '#ff4040', color: '#fff',
+                            verticalAlign: 'middle',
+                            boxShadow: '0 0 8px rgba(255,64,64,0.55)',
+                          }}>DIFF</span>
+                        )}
+                        {field}
                       </td>
-                      <td style={{ padding: '10px 12px', wordBreak: 'break-all', color: isDiff ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
-                        {aVal === undefined ? '-' : aVal === null ? <span style={{ color: '#aaa', fontStyle: 'italic' }}>NULL</span> : String(aVal)}
+                      {/* 接口前值 — 红色删除线 */}
+                      <td style={{
+                        padding: '10px 12px', wordBreak: 'break-all',
+                        fontFamily: isDiff ? 'monospace' : 'inherit',
+                        fontWeight: isDiff ? 600 : 400,
+                        color: isDiff ? '#ff7070' : 'var(--text-secondary)',
+                        textDecoration: isDiff ? 'line-through' : 'none',
+                      }}>
+                        {fmtVal(bVal)}
+                      </td>
+                      {/* 接口后值 — 绿色加粗 */}
+                      <td style={{
+                        padding: '10px 12px', wordBreak: 'break-all',
+                        fontFamily: isDiff ? 'monospace' : 'inherit',
+                        fontWeight: isDiff ? 700 : 400,
+                        color: isDiff ? '#f5a623' : 'var(--text-secondary)',
+                      }}>
+                        {isDiff && <span style={{ marginRight: 5, fontSize: 12, opacity: 0.8 }}>→</span>}
+                        {fmtVal(aVal)}
                       </td>
                     </tr>
                   );
@@ -1130,6 +1185,8 @@ function App() {
       case 'ERROR': return 'log-error';
       case 'WARN': return 'log-warn';
       case 'SQL': return 'log-sql';
+      case 'PHASE': return 'log-phase';
+      case 'TABLE': return 'log-table';
       default: return 'log-info';
     }
   };
@@ -1297,25 +1354,22 @@ function App() {
   };
 
   const handleSaveApiSettings = () => {
-    // 保存API设置（可以保存到本地存储）
-    localStorage.setItem('apiSettings', JSON.stringify(apiSettings));
+    if (window.electronAPI) window.electronAPI.setConfig('apiSettings', JSON.stringify(apiSettings));
     setShowApiSettings(false);
     addLog('API设置保存成功');
   };
 
   const handleSaveDbSettings = () => {
-    // 保存数据库设置到本地存储
-    localStorage.setItem('dbSettings', JSON.stringify(dbSettings));
-    // 保存系统级数据库配置到本地存储
-    localStorage.setItem('systemDbConfig', JSON.stringify(systemDbConfig));
+    if (window.electronAPI) {
+      window.electronAPI.setConfig('dbSettings', JSON.stringify(dbSettings));
+      window.electronAPI.setConfig('systemDbConfig', JSON.stringify(systemDbConfig));
+    }
     setShowDbSettings(false);
     addLog('数据库设置保存成功');
   };
 
   const handleSaveSystemSettings = () => {
-    // 保存系统配置到本地存储
-    localStorage.setItem('systemSettings', JSON.stringify(systemSettings));
-    // 同步 tableSettings 给主进程缓存，作为兜底
+    if (window.electronAPI) window.electronAPI.setConfig('systemSettings', JSON.stringify(systemSettings));
     if (electronAPI) {
       try {
         electronAPI.saveTableSettings(systemSettings.tables)
@@ -1329,7 +1383,7 @@ function App() {
   };
 
   const handleSaveDefaultTableSettings = () => {
-    localStorage.setItem('defaultTableSettings', JSON.stringify(defaultTableSettings));
+    if (window.electronAPI) window.electronAPI.setConfig('defaultTableSettings', JSON.stringify(defaultTableSettings));
     if (electronAPI) {
       try {
         const mergedTables = { ...defaultTableSettings.tables, ...systemSettings.tables };
@@ -1798,11 +1852,13 @@ function App() {
       if (newDefaultTableSettings) setDefaultTableSettings(newDefaultTableSettings);
 
       // 持久化
-      localStorage.setItem('apiSettings', JSON.stringify(newApiSettings));
-      localStorage.setItem('dbSettings', JSON.stringify(newDbSettings));
-      localStorage.setItem('systemDbConfig', JSON.stringify(newSystemDbConfig));
-      localStorage.setItem('systemSettings', JSON.stringify(newSystemSettings));
-      if (newDefaultTableSettings) localStorage.setItem('defaultTableSettings', JSON.stringify(newDefaultTableSettings));
+      if (window.electronAPI) {
+        window.electronAPI.setConfig('apiSettings', JSON.stringify(newApiSettings));
+        window.electronAPI.setConfig('dbSettings', JSON.stringify(newDbSettings));
+        window.electronAPI.setConfig('systemDbConfig', JSON.stringify(newSystemDbConfig));
+        window.electronAPI.setConfig('systemSettings', JSON.stringify(newSystemSettings));
+        if (newDefaultTableSettings) window.electronAPI.setConfig('defaultTableSettings', JSON.stringify(newDefaultTableSettings));
+      }
 
       // 同步给主进程
       if (electronAPI) {
@@ -1917,7 +1973,7 @@ function App() {
     } else {
       document.documentElement.setAttribute('data-theme', 'light');
     }
-    localStorage.setItem('themeMode', isDarkMode ? 'dark' : 'light');
+    if (window.electronAPI) window.electronAPI.setConfig('themeMode', isDarkMode ? 'dark' : 'light');
   }, [isDarkMode]);
 
   // ===== JMX 导入功能 =====
@@ -2072,94 +2128,93 @@ function App() {
   };
 
 
-  // 从本地存储加载API设置
+  // 从本地数据库加载所有配置
   useEffect(() => {
-    const savedSettings = localStorage.getItem('apiSettings');
-    if (savedSettings) {
+    async function loadAllSettings() {
+      if (!window.electronAPI) return;
+      
       try {
-        startTransition(() => {
-          setApiSettings(JSON.parse(savedSettings));
-        });
-      } catch (error) {
-        console.error('加载API设置失败:', error);
-      }
-    }
-  }, []);
+        const savedAuthApiBaseUrl = await window.electronAPI.getConfig('authApiBaseUrl');
+        if (savedAuthApiBaseUrl) setAuthApiBaseUrl(savedAuthApiBaseUrl);
 
-  // 从本地存储加载数据库设置
-  useEffect(() => {
-    const savedDbSettings = localStorage.getItem('dbSettings');
-    if (savedDbSettings) {
-      try {
-        startTransition(() => {
-          setDbSettings(JSON.parse(savedDbSettings));
-        });
-      } catch (error) {
-        console.error('加载数据库设置失败:', error);
-      }
-    }
+        const savedThemeMode = await window.electronAPI.getConfig('themeMode');
+        if (savedThemeMode !== null) setIsDarkMode(savedThemeMode === 'dark');
 
-    // 从本地存储加载系统级数据库配置
-    const savedSystemDbConfig = localStorage.getItem('systemDbConfig');
-    if (savedSystemDbConfig) {
-      try {
-        startTransition(() => {
-          setSystemDbConfig(JSON.parse(savedSystemDbConfig));
-        });
-      } catch (error) {
-        console.error('加载系统级数据库配置失败:', error);
-      }
-    }
-
-    // 从本地存储加载系统配置
-    const savedSystemSettings = localStorage.getItem('systemSettings');
-    if (savedSystemSettings) {
-      try {
-        const parsed = JSON.parse(savedSystemSettings);
-        if (parsed && parsed.tables && typeof parsed.tables === 'object') {
-          const sanitizedTables = {};
-          for (const [tName, tConfig] of Object.entries(parsed.tables)) {
-            if (tConfig && typeof tConfig === 'object') {
-              sanitizedTables[tName] = {
-                chineseName: tConfig.chineseName || '',
-                primaryKey: tConfig.primaryKey || '',
-                conditionFields: Array.isArray(tConfig.conditionFields) ? tConfig.conditionFields : []
-              };
-            }
-          }
-          startTransition(() => {
-            setSystemSettings({ tables: sanitizedTables });
-          });
+        const savedApiSettings = await window.electronAPI.getConfig('apiSettings');
+        if (savedApiSettings) {
+          try {
+            startTransition(() => {
+              setApiSettings(JSON.parse(savedApiSettings));
+            });
+          } catch (e) { console.error('加载API设置失败:', e); }
         }
-      } catch (error) {
-        console.error('加载系统配置失败:', error);
-      }
-    }
 
-    // 从本地存储加载默认表配置
-    const savedDefaultTableSettings = localStorage.getItem('defaultTableSettings');
-    if (savedDefaultTableSettings) {
-      try {
-        const parsed = JSON.parse(savedDefaultTableSettings);
-        if (parsed && parsed.tables && typeof parsed.tables === 'object') {
-          const sanitizedTables = {};
-          for (const [tName, tConfig] of Object.entries(parsed.tables)) {
-            if (tConfig && typeof tConfig === 'object') {
-              sanitizedTables[tName] = {
-                chineseName: tConfig.chineseName || '',
-                primaryKey: tConfig.primaryKey || '',
-                conditionFields: Array.isArray(tConfig.conditionFields) ? tConfig.conditionFields : []
-              };
-            }
-          }
-          startTransition(() => {
-            setDefaultTableSettings({ tables: sanitizedTables });
-          });
+        const savedDbSettings = await window.electronAPI.getConfig('dbSettings');
+        if (savedDbSettings) {
+          try {
+            startTransition(() => {
+              setDbSettings(JSON.parse(savedDbSettings));
+            });
+          } catch (e) { console.error('加载数据库设置失败:', e); }
         }
-      } catch (error) {
-        console.error('加载默认表配置失败:', error);
+
+        const savedSystemDbConfig = await window.electronAPI.getConfig('systemDbConfig');
+        if (savedSystemDbConfig) {
+          try {
+            startTransition(() => {
+              setSystemDbConfig(JSON.parse(savedSystemDbConfig));
+            });
+          } catch (e) { console.error('加载系统级数据库配置失败:', e); }
+        }
+
+        const savedSystemSettings = await window.electronAPI.getConfig('systemSettings');
+        if (savedSystemSettings) {
+          try {
+            const parsed = JSON.parse(savedSystemSettings);
+            if (parsed && parsed.tables && typeof parsed.tables === 'object') {
+              const sanitizedTables = {};
+              for (const [tName, tConfig] of Object.entries(parsed.tables)) {
+                if (tConfig && typeof tConfig === 'object') {
+                  sanitizedTables[tName] = {
+                    chineseName: tConfig.chineseName || '',
+                    primaryKey: tConfig.primaryKey || '',
+                    conditionFields: Array.isArray(tConfig.conditionFields) ? tConfig.conditionFields : []
+                  };
+                }
+              }
+              startTransition(() => {
+                setSystemSettings({ tables: sanitizedTables });
+              });
+            }
+          } catch (e) { console.error('加载系统配置失败:', e); }
+        }
+
+        const savedDefaultTableSettings = await window.electronAPI.getConfig('defaultTableSettings');
+        if (savedDefaultTableSettings) {
+          try {
+            const parsed = JSON.parse(savedDefaultTableSettings);
+            if (parsed && parsed.tables && typeof parsed.tables === 'object') {
+              const sanitizedTables = {};
+              for (const [tName, tConfig] of Object.entries(parsed.tables)) {
+                if (tConfig && typeof tConfig === 'object') {
+                  sanitizedTables[tName] = {
+                    chineseName: tConfig.chineseName || '',
+                    primaryKey: tConfig.primaryKey || '',
+                    conditionFields: Array.isArray(tConfig.conditionFields) ? tConfig.conditionFields : []
+                  };
+                }
+              }
+              startTransition(() => {
+                setDefaultTableSettings({ tables: sanitizedTables });
+              });
+            }
+          } catch (e) { console.error('加载默认表配置失败:', e); }
+        }
+      } catch (err) {
+        console.error('加载本地数据库配置失败:', err);
       }
     }
+    loadAllSettings();
   }, []);
 
   // 保持 ref 与最新 state 同步（供异步函数使用）
@@ -2413,17 +2468,38 @@ function App() {
                     <div className="empty-text">点击"执行核对"开始检查</div>
                   </div>
                 ) : (
-                  logs.map((log, index) => (
-                    <div
-                      key={log.id ?? index}
-                      className={`log-line ${getLogClass(log.level)}`}
-                      style={{ '--log-i': Math.min(index, 25) }}
-                    >
-                      <span className="log-time">{log.timestamp}</span>
-                      <span className={`log-level level-${log.level?.toLowerCase()}`}>{log.level}</span>
-                      <span className="log-msg">{log.message}</span>
-                    </div>
-                  ))
+                  logs.map((log, index) => {
+                    const level = log.level || 'INFO';
+                    // 阶段分隔条
+                    if (level === 'PHASE') {
+                      return (
+                        <div key={log.id ?? index} className="log-phase-banner" style={{ '--log-i': Math.min(index, 25) }}>
+                          <span className="log-phase-icon">▶</span>
+                          <span className="log-phase-text">{log.message}</span>
+                        </div>
+                      );
+                    }
+                    // 表名标头
+                    if (level === 'TABLE') {
+                      return (
+                        <div key={log.id ?? index} className="log-table-header" style={{ '--log-i': Math.min(index, 25) }}>
+                          <span className="log-table-icon">🗂</span>
+                          <span className="log-table-name">{log.message}</span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        key={log.id ?? index}
+                        className={`log-line ${getLogClass(level)}`}
+                        style={{ '--log-i': Math.min(index, 25) }}
+                      >
+                        <span className="log-time">{log.timestamp}</span>
+                        <span className={`log-level level-${level.toLowerCase()}`}>{level}</span>
+                        <span className="log-msg">{log.message}</span>
+                      </div>
+                    );
+                  })
                 )}
               </div>
             </div>

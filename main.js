@@ -4,6 +4,24 @@ import { fileURLToPath } from 'url';
 /* global process */
 import { writeFile } from 'fs/promises';
 import fs from 'fs';
+import sqlite3 from 'sqlite3';
+
+let configDb;
+
+function initConfigDB() {
+  const dbPath = path.join(app.getPath('userData'), 'local_config.db');
+  configDb = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+      console.error('[main] 本地数据库连接失败:', err.message);
+    } else {
+      console.log('[main] 连接到本地数据库:', dbPath);
+      configDb.run(`CREATE TABLE IF NOT EXISTS app_config (
+        key TEXT PRIMARY KEY,
+        value TEXT
+      )`);
+    }
+  });
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -218,14 +236,14 @@ class DataConsistencyChecker {
     return true;
   }
 
-  async runCheck(request) {
+  // ── 接口调用前：查询各表当前状态 ──────────────────────────────────
+  async runBeforeCheck(request) {
     const logs = [];
     const addLog = (message, level = 'INFO') => {
       logs.push({ timestamp: new Date().toISOString(), level, message });
     };
 
     try {
-      addLog('开始执行数据一致性检查 (Node.js)...');
       const {
         tables = [],
         tableConditions = {},
@@ -233,50 +251,36 @@ class DataConsistencyChecker {
         environment = null,
       } = request;
 
-      addLog('开始按顺序查询各表（支持跨表依赖）...');
-
       const beforeData = {};
       const tableResultsCache = {};
 
       for (const tableName of tables) {
-        addLog(`处理表: ${tableName}`);
+        addLog(tableName, 'TABLE');
         const baseConditions = { ...(tableConditions[tableName] || {}) };
         const tableConfig = tableSettings[tableName];
-        addLog(
-          `  tableSettings中 ${tableName} 的配置: ${tableConfig ? JSON.stringify(tableConfig.conditionFields) : '(无配置)'}`
-        );
-        addLog(`  当前 tableResultsCache 的表: [${Object.keys(tableResultsCache).join(', ')}]`);
+
         if (tableConfig && tableConfig.conditionFields) {
           for (const cond of tableConfig.conditionFields) {
             if (cond.source !== 'table') continue;
             const parts = (cond.path || '').split('.');
             const depTable = parts[0];
             const depField = parts.slice(1).join('.');
-            addLog(
-              `  处理table依赖: field=${cond.field}, path=${cond.path}, depTable=${depTable}, depField=${depField}`
-            );
             if (depTable && depField && tableResultsCache[depTable]) {
               const val = tableResultsCache[depTable][depField];
               if (val !== undefined && val !== null) {
                 baseConditions[cond.field] = String(val);
-                addLog(`  从表 ${depTable} 获取 ${cond.field} = ${val}`);
+                addLog(`[${tableName}] 跨表依赖: ${cond.field} = ${val}（来自 ${depTable}）`);
               } else {
-                addLog(
-                  `  警告: 依赖表 ${depTable} 中字段 ${depField} 不存在或为空，可用字段: [${Object.keys(tableResultsCache[depTable] || {}).join(', ')}]`,
-                  'WARNING'
-                );
+                addLog(`[${tableName}] 警告: 依赖表 ${depTable}.${depField} 为空`, 'WARN');
               }
             } else {
-              addLog(
-                `  警告: 依赖表 ${depTable} 尚未查询或无结果缓存（缓存中有: [${Object.keys(tableResultsCache).join(', ')}]）`,
-                'WARNING'
-              );
+              addLog(`[${tableName}] 警告: 依赖表 ${depTable} 尚未查询`, 'WARN');
             }
           }
         }
 
         if (Object.keys(baseConditions).length === 0) {
-          addLog(`表 ${tableName} 没有查询条件，跳过查询`, 'WARNING');
+          addLog(`[${tableName}] 无查询条件，跳过`, 'WARN');
           continue;
         }
 
@@ -284,14 +288,10 @@ class DataConsistencyChecker {
         if (!routingValue) routingValue = Object.values(baseConditions)[0];
 
         const { dbName, tableNameWithSuffix, hashResult, dbIndex } = this.calculateRouting(
-          routingValue,
-          environment,
-          tableName
+          routingValue, environment, tableName
         );
         const tableDus = tableSettings[tableName]?.dus || 'bdus';
-        addLog(
-          `路由到: 数据源 ${dbIndex} (${dbName}) . ${tableNameWithSuffix} (hash=${hashResult}) [DUS: ${tableDus}]`
-        );
+        addLog(`[${tableName}] 路由 → ${tableNameWithSuffix} | 数据源${dbIndex}(${dbName}) hash=${hashResult} DUS:${tableDus}`);
 
         const safeTableName = this.quoteIdentifier(tableNameWithSuffix, 'table');
         const { clause: whereClause, values } = this.buildWhereClause(baseConditions);
@@ -300,55 +300,57 @@ class DataConsistencyChecker {
         let displaySqlQuery = sqlQuery;
         values.forEach((val, idx) => {
           const valStr = typeof val === 'string' ? `'${val}'` : val;
-          displaySqlQuery = displaySqlQuery.replace(
-            new RegExp(`\\$${idx + 1}(?!\\d)`, 'g'),
-            valStr
-          );
+          displaySqlQuery = displaySqlQuery.replace(new RegExp(`\\$${idx + 1}(?!\\d)`, 'g'), valStr);
         });
 
-        addLog(`SQL查询: ${displaySqlQuery}`, 'SQL');
-        addLog(`查询条件: ${JSON.stringify(baseConditions)}`);
+        addLog(`[${tableName}] ${displaySqlQuery}`, 'SQL');
 
         try {
-          addLog(`尝试连接到环境 ${environment} 的 [${tableDus}] 数据源 ${dbIndex}...`);
-          const results = await this.queryDatabase(
-            dbIndex,
-            environment,
-            request.dbSettings,
-            sqlQuery,
-            values,
-            tableDus
-          );
-          addLog(`成功连接到 [${tableDus}] 数据源 ${dbIndex}`);
+          const results = await this.queryDatabase(dbIndex, environment, request.dbSettings, sqlQuery, values, tableDus);
           beforeData[tableName] = { sql: displaySqlQuery, count: results.length, data: results };
-          addLog(`查询到 ${results.length} 条记录`);
-          if (results.length > 0) {
-            tableResultsCache[tableName] = results[0];
-            addLog(`缓存表 ${tableName} 的查询结果，供后续表依赖使用`);
-          }
+          addLog(`[${tableName}] 查询完成，共 ${results.length} 条记录`);
+          if (results.length > 0) tableResultsCache[tableName] = results[0];
         } catch (e) {
-          addLog(`查询失败: ${e.message}`, 'ERROR');
+          addLog(`[${tableName}] 查询失败: ${e.message}`, 'ERROR');
           throw e;
         }
       }
 
-      if (request.apiResponse) {
-        addLog('使用提供的API响应进行后续处理...');
-      } else {
-        addLog('未提供API响应，跳过接口调用');
-      }
+      return { success: true, logs, beforeData };
+    } catch (e) {
+      addLog(`执行失败: ${e.message}`, 'ERROR');
+      return { success: false, logs, beforeData: {}, error: e.message };
+    }
+  }
+
+  // ── 接口调用后：查询各表最新状态并与前置结果比对 ─────────────────
+  async runAfterCheck(request) {
+    const logs = [];
+    const addLog = (message, level = 'INFO') => {
+      logs.push({ timestamp: new Date().toISOString(), level, message });
+    };
+
+    try {
+      addLog('【接口后】开始执行后置 SQL 查询...');
+      const {
+        tables = [],
+        tableConditions = {},
+        tableSettings = {},
+        environment = null,
+        beforeData = {},
+      } = request;
 
       const afterData = {};
       const afterResultsCache = {};
 
       for (const tableName of tables) {
+        addLog(tableName, 'TABLE');
+
         const baseConditions = { ...(tableConditions[tableName] || {}) };
         if (
           Object.keys(baseConditions).length === 0 &&
           !tableSettings[tableName]?.conditionFields?.some((c) => c.source === 'table')
-        ) {
-          continue;
-        }
+        ) continue;
 
         const tableConfig = tableSettings[tableName];
         if (tableConfig && tableConfig.conditionFields) {
@@ -359,9 +361,7 @@ class DataConsistencyChecker {
             const depField = parts.slice(1).join('.');
             if (depTable && depField && afterResultsCache[depTable]) {
               const val = afterResultsCache[depTable][depField];
-              if (val !== undefined && val !== null) {
-                baseConditions[cond.field] = String(val);
-              }
+              if (val !== undefined && val !== null) baseConditions[cond.field] = String(val);
             }
           }
         }
@@ -372,11 +372,7 @@ class DataConsistencyChecker {
         if (!routingValue) routingValue = Object.values(baseConditions)[0];
 
         const tableDus = tableSettings[tableName]?.dus || 'bdus';
-        const { dbName: _dbName, tableNameWithSuffix, dbIndex } = this.calculateRouting(
-          routingValue,
-          environment,
-          tableName
-        );
+        const { dbName: _dbName, tableNameWithSuffix, dbIndex } = this.calculateRouting(routingValue, environment, tableName);
         const safeTableName = this.quoteIdentifier(tableNameWithSuffix, 'table');
         const { clause: whereClause, values } = this.buildWhereClause(baseConditions);
         const sqlQuery = `SELECT * FROM ${safeTableName} WHERE ${whereClause}`;
@@ -384,70 +380,41 @@ class DataConsistencyChecker {
         let displaySqlQuery = sqlQuery;
         values.forEach((val, idx) => {
           const valStr = typeof val === 'string' ? `'${val}'` : val;
-          displaySqlQuery = displaySqlQuery.replace(
-            new RegExp(`\\$${idx + 1}(?!\\d)`, 'g'),
-            valStr
-          );
+          displaySqlQuery = displaySqlQuery.replace(new RegExp(`\\$${idx + 1}(?!\\d)`, 'g'), valStr);
         });
 
+        addLog(`[${tableName}] ${displaySqlQuery}`, 'SQL');
+
         try {
-          const results = await this.queryDatabase(
-            dbIndex,
-            environment,
-            request.dbSettings,
-            sqlQuery,
-            values,
-            tableDus
-          );
+          const results = await this.queryDatabase(dbIndex, environment, request.dbSettings, sqlQuery, values, tableDus);
           afterData[tableName] = { sql: displaySqlQuery, count: results.length, data: results };
+          addLog(`[${tableName}] 查询完成，共 ${results.length} 条记录`);
           if (results.length > 0) afterResultsCache[tableName] = results[0];
         } catch (e) {
-          addLog(`查询失败: ${e.message}`, 'ERROR');
+          addLog(`[${tableName}] 查询失败: ${e.message}`, 'ERROR');
           throw e;
         }
       }
 
-      addLog('开始比对数据差异...');
       const resultsArray = [];
-
       for (const tableName of tables) {
         const before = beforeData[tableName] || {};
         const after = afterData[tableName] || {};
         if (before.error || after.error) {
-          resultsArray.push({
-            table: tableName,
-            status: '错误',
-            message: before.error || after.error,
-            before,
-            after,
-            diff: null,
-          });
+          addLog(`[${tableName}] ✗ 查询出错`, 'ERROR');
+          resultsArray.push({ table: tableName, status: '错误', message: before.error || after.error, before, after, diff: null });
           continue;
         }
         const beforeCount = before.count || 0;
         const afterCount = after.count || 0;
         if (beforeCount === afterCount && this.deepEqual(before.data, after.data)) {
-          resultsArray.push({
-            table: tableName,
-            status: '通过',
-            message: '数据一致性检查通过',
-            before,
-            after,
-            diff: null,
-          });
+          addLog(`[${tableName}] ✓ 数据一致（${beforeCount} 条记录无变化）`);
+          resultsArray.push({ table: tableName, status: '通过', message: '数据一致性检查通过', before, after, diff: null });
         } else {
-          resultsArray.push({
-            table: tableName,
-            status: '失败',
-            message: '数据不一致',
-            before,
-            after,
-            diff: { count_changed: true },
-          });
+          addLog(`[${tableName}] ✗ 数据不一致（前:${beforeCount}条 → 后:${afterCount}条）`, 'WARN');
+          resultsArray.push({ table: tableName, status: '失败', message: '数据不一致', before, after, diff: { count_changed: true } });
         }
       }
-
-      addLog('数据一致性检查完成');
       return { success: true, logs, results: resultsArray };
     } catch (e) {
       addLog(`执行失败: ${e.message}`, 'ERROR');
@@ -480,30 +447,37 @@ ipcMain.handle('save-table-settings', async (event, tableSettings) => {
   return { ok: false, error: 'Invalid table settings payload' };
 });
 
-// 注册 IPC：执行数据一致性校验
-ipcMain.handle('run-node-check', async (event, requestPayload) => {
-  if (!isPlainObject(requestPayload)) {
-    throw new Error('Invalid request payload');
-  }
-
-  // backend 已内联，configPath 直接用 __dirname
-  const configPath = path.join(__dirname, 'backend', 'config', 'config.json');
-  const checker = new DataConsistencyChecker(configPath);
-  let normalizedPayload = { ...requestPayload };
-
+// 注册 IPC：执行数据一致性校验（拆分为前置/后置两步）
+function normalizeCheckPayload(requestPayload) {
+  let payload = { ...requestPayload };
   if (
-    !isPlainObject(normalizedPayload.tableSettings) ||
-    Object.keys(normalizedPayload.tableSettings).length === 0
+    !isPlainObject(payload.tableSettings) ||
+    Object.keys(payload.tableSettings).length === 0
   ) {
     if (Object.keys(cachedTableSettings).length > 0) {
       console.log('[main] tableSettings missing in payload, using cached version');
-      normalizedPayload = { ...normalizedPayload, tableSettings: cachedTableSettings };
+      payload = { ...payload, tableSettings: cachedTableSettings };
     }
   } else {
-    cachedTableSettings = normalizedPayload.tableSettings;
+    cachedTableSettings = payload.tableSettings;
   }
+  return payload;
+}
 
-  return await checker.runCheck(normalizedPayload);
+// 接口调用前：查询各表当前状态
+ipcMain.handle('run-before-check', async (event, requestPayload) => {
+  if (!isPlainObject(requestPayload)) throw new Error('Invalid request payload');
+  const configPath = path.join(__dirname, 'backend', 'config', 'config.json');
+  const checker = new DataConsistencyChecker(configPath);
+  return await checker.runBeforeCheck(normalizeCheckPayload(requestPayload));
+});
+
+// 接口调用后：查询各表最新状态并与前置结果比对
+ipcMain.handle('run-after-check', async (event, requestPayload) => {
+  if (!isPlainObject(requestPayload)) throw new Error('Invalid request payload');
+  const configPath = path.join(__dirname, 'backend', 'config', 'config.json');
+  const checker = new DataConsistencyChecker(configPath);
+  return await checker.runAfterCheck(normalizeCheckPayload(requestPayload));
 });
 
 // 注册 IPC：查询系统数据库（通用单次查询）
@@ -571,7 +545,7 @@ function createWindow() {
     minWidth: 1000,
     minHeight: 600,
     title: '数据一致性自动化核对工具',
-    icon: path.join(__dirname, 'public', 'icons', 'api_post256x256.ico'),
+    icon: path.join(__dirname, 'build', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
@@ -638,7 +612,33 @@ const createMenu = () => {
 
 createMenu();
 
+// 注册配置存储的 IPC
+ipcMain.handle('get-config', (event, key) => {
+  return new Promise((resolve, reject) => {
+    if (!configDb) return resolve(null);
+    configDb.get('SELECT value FROM app_config WHERE key = ?', [key], (err, row) => {
+      if (err) reject(err);
+      else resolve(row ? row.value : null);
+    });
+  });
+});
+
+ipcMain.handle('set-config', (event, key, value) => {
+  return new Promise((resolve, reject) => {
+    if (!configDb) return resolve({ success: false, error: 'DB not initialized' });
+    configDb.run(
+      'INSERT INTO app_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      [key, value],
+      function (err) {
+        if (err) reject(err);
+        else resolve({ success: true });
+      }
+    );
+  });
+});
+
 app.whenReady().then(() => {
+  initConfigDB();
   startBackend();
   createWindow();
   app.on('activate', function () {

@@ -1098,6 +1098,66 @@ body::after {
   background: var(--sql-bg);
 }
 
+/* ── PHASE 阶段横幅 ── */
+.log-phase-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  margin: 6px 0 2px;
+  background: linear-gradient(90deg, rgba(229,109,64,0.18) 0%, rgba(229,109,64,0.06) 60%, transparent 100%);
+  border-left: 3px solid var(--accent);
+  animation: logSlideIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--log-i, 0) * 38ms);
+}
+
+.log-phase-icon {
+  font-size: 10px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.log-phase-text {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* ── TABLE 表名标头 ── */
+.log-table-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px 4px 24px;
+  margin-top: 2px;
+  animation: logSlideIn 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--log-i, 0) * 38ms);
+}
+
+.log-table-icon {
+  font-size: 12px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.log-table-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #7ecfff;
+  font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  letter-spacing: 0.02em;
+  background: rgba(126, 207, 255, 0.1);
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(126, 207, 255, 0.25);
+}
+
+.log-sql .log-msg {
+  color: var(--sql);
+}
+
 .log-time {
   color: var(--text-muted);
   font-size: 11px;

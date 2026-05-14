@@ -9,14 +9,23 @@ const electronAPI = {
   saveTableSettings(tableSettings) {
     return ipcRenderer.invoke('save-table-settings', tableSettings);
   },
-  runNodeCheck(requestPayload) {
-    return ipcRenderer.invoke('run-node-check', requestPayload);
+  runBeforeCheck(requestPayload) {
+    return ipcRenderer.invoke('run-before-check', requestPayload);
+  },
+  runAfterCheck(requestPayload) {
+    return ipcRenderer.invoke('run-after-check', requestPayload);
   },
   querySystemDb(payload) {
     return ipcRenderer.invoke('query-system-db', payload);
   },
   saveFile(payload) {
     return ipcRenderer.invoke('save-file', payload);
+  },
+  getConfig(key) {
+    return ipcRenderer.invoke('get-config', key);
+  },
+  setConfig(key, value) {
+    return ipcRenderer.invoke('set-config', key, value);
   },
   encryptText(plaintext) {
     if (!plaintext) return plaintext;
