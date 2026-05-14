@@ -92,6 +92,7 @@ function App() {
   const [showDbSettings, setShowDbSettings] = useState(false);
   const [showSystemSettings, setShowSystemSettings] = useState(false);
   const [showDefaultTableSettings, setShowDefaultTableSettings] = useState(false);
+  const [showAboutModal, setShowAboutModal] = useState(false);
   const [tableSearchQuery, setTableSearchQuery] = useState('');
   const [defaultTableSearchQuery, setDefaultTableSearchQuery] = useState('');
   const [defaultTableSettings, setDefaultTableSettings] = useState({ tables: {} });
@@ -827,6 +828,14 @@ function App() {
         throw parseError;
       }
 
+      // 如果是介质号 (05开头)，强制优先查询 tb_dpmst_medium
+      if (routingKey?.type === 'medium_no') {
+        const mediumTable = 'tb_dpmst_medium';
+        effectiveTables = effectiveTables.filter(t => t !== mediumTable);
+        effectiveTables.unshift(mediumTable);
+        addLog(`检测到介质号请求，强制置顶优先查询 [${mediumTable}] 表`, 'INFO');
+      }
+
       addLog('条件提取 · 为各检查表构建查询条件', 'PHASE');
       const tableConditions = {};
       const skippedTables = [];
@@ -846,8 +855,8 @@ function App() {
             const table = { name: tableName };
             const conditions = {};
             for (const cond of config.conditionFields) {
-              if (cond.source === 'table') {
-                // 跳过表依赖条件，交由后端处理
+              if (cond.source === 'table' || cond.source === 'response') {
+                // 跳过表依赖条件和响应依赖条件，交由后续阶段处理
                 continue;
               }
               let value = null;
@@ -935,6 +944,15 @@ function App() {
 
       const tablesToCheck = effectiveTables.filter(t => !skippedTables.includes(t));
 
+      const hasResponseCond = (tableName) => {
+        const mergedTables = { ...defaultTableSettings.tables, ...systemSettings.tables };
+        const config = mergedTables[tableName];
+        return config?.conditionFields?.some(c => c.source === 'response');
+      };
+      
+      const beforeTablesToCheck = tablesToCheck.filter(t => !hasResponseCond(t));
+      const afterTablesToCheck = tablesToCheck;
+
       if (tablesToCheck.length === 0) {
         // 无可检查的表，直接发送正式接口并跳过 SQL 比对
         addLog('无需执行 SQL 比对：所有检查表均已跳过或未获取到有效表名', 'WARN');
@@ -977,26 +995,30 @@ function App() {
 
           // ── Step 1: 接口调用前 SQL 查询 ──────────────────────────────
           addLog('接口请求前 · 前置 SQL 查询', 'PHASE');
-          let beforeCheckData;
-          if (electronAPI) {
-            try {
-              beforeCheckData = await electronAPI.runBeforeCheck(basePayload);
-            } catch (err) {
-              addLog(`前置 SQL 查询调用失败: ${err.message}`, 'ERROR');
-              throw err;
+          let beforeCheckData = { beforeData: {}, logs: [] };
+          if (beforeTablesToCheck.length > 0) {
+            if (electronAPI) {
+              try {
+                beforeCheckData = await electronAPI.runBeforeCheck({ ...basePayload, tables: beforeTablesToCheck });
+              } catch (err) {
+                addLog(`前置 SQL 查询调用失败: ${err.message}`, 'ERROR');
+                throw err;
+              }
+            } else {
+              addLog('纯浏览器环境，回退到后台 HTTP 接口...', 'WARN');
+              const res = await axios.post('http://localhost:8000/api/before-check', { ...basePayload, tables: beforeTablesToCheck });
+              beforeCheckData = res.data;
             }
+            for (const log of (beforeCheckData?.logs || [])) {
+              addLog(log.message, log.level || 'INFO');
+            }
+            if (!beforeCheckData?.success) {
+              throw new Error(beforeCheckData?.error || '前置 SQL 查询失败，请查看执行日志');
+            }
+            addLog('接口请求前 · 前置查询完成 ✓', 'PHASE');
           } else {
-            addLog('纯浏览器环境，回退到后台 HTTP 接口...', 'WARN');
-            const res = await axios.post('http://localhost:8000/api/before-check', basePayload);
-            beforeCheckData = res.data;
+            addLog('无可执行前置查询的表（存在响应报文依赖），跳过前置查询', 'INFO');
           }
-          for (const log of (beforeCheckData?.logs || [])) {
-            addLog(log.message, log.level || 'INFO');
-          }
-          if (!beforeCheckData?.success) {
-            throw new Error(beforeCheckData?.error || '前置 SQL 查询失败，请查看执行日志');
-          }
-          addLog('接口请求前 · 前置查询完成 ✓', 'PHASE');
 
           // ── Step 2: 正式接口调用 ──────────────────────────────────────
           addLog(`正式发送 · 调用接口`, 'PHASE');
@@ -1020,6 +1042,25 @@ function App() {
           }
 
           // ── Step 3: 接口调用后 SQL 查询 + 比对 ───────────────────────
+          addLog('提取响应报文查询条件', 'PHASE');
+          for (const tableName of afterTablesToCheck) {
+            const mergedTables = { ...defaultTableSettings.tables, ...systemSettings.tables };
+            const config = mergedTables[tableName];
+            if (!config) continue;
+            for (const cond of config.conditionFields) {
+              if (cond.source === 'response') {
+                const value = extractValue(apiResponse, cond.path);
+                if (value !== undefined && value !== null) {
+                  if (!tableConditions[tableName]) tableConditions[tableName] = {};
+                  tableConditions[tableName][cond.field] = String(value);
+                  addLog(`[${tableName}] ${cond.field} = ${value} (来自响应报文)`);
+                } else if (cond.required) {
+                  addLog(`[${tableName}] 必填字段 ${cond.field} 无法从响应报文中提取`, 'ERROR');
+                }
+              }
+            }
+          }
+
           addLog('接口请求后 · 后置 SQL 查询 + 比对', 'PHASE');
           let checkData;
           if (electronAPI) {
@@ -1514,7 +1555,7 @@ function App() {
     lines.push('# ╔══════════════════════════════════════════╗');
     lines.push('# ║     系统表配置（断言查询条件规则）       ║');
     lines.push('# ╚══════════════════════════════════════════╝');
-    lines.push('# source 可选值: request（请求报文）| route（路由结果）| table（其他表）');
+    lines.push('# source 可选值: request（请求报文）| response（响应报文）| route（路由结果）| table（其他表）');
     lines.push('');
 
     const tables = sysSettings.tables || {};
@@ -2257,9 +2298,9 @@ function App() {
         <div className="header-left">
           <div className="logo">
             <span className="logo-icon">⇌</span>
-            <span className="logo-text">自动化数据断言</span>
+            <span className="logo-text">自动化交易数据断言</span>
           </div>
-          <span className="header-badge">查-发-查-比</span>
+          <span className="header-badge">比对交易发送前后数据差异</span>
         </div>
         <div className="header-right">
           <div className="user-chip">
@@ -2330,7 +2371,7 @@ function App() {
                 <button className="dropdown-item" onClick={handleDefaultTableSettingsClick}>默认表配置</button>
                 <button className="dropdown-item" onClick={handleDbSettingsClick}>数据库配置</button>
                 <button className="dropdown-item" onClick={handleApiSettingsClick}>API设置</button>
-                <button className="dropdown-item">关于</button>
+                <button className="dropdown-item" onClick={() => { setShowAboutModal(true); setShowSettingsDropdown(false); }}>关于</button>
               </div>
             )}
           </div>
@@ -2358,7 +2399,7 @@ function App() {
                 title="从 JMeter JMX 脚本导入报文"
               >
                 <span className="btn-jmx-icon">⇣</span>
-                JMX
+                Jmeter
               </button>
               <input
                 ref={jmxFileRef}
@@ -3051,6 +3092,29 @@ function App() {
                               </select>
                             </div>
                           </div>
+                          <div className="pk-dus-row" style={{ marginTop: '10px' }}>
+                            <div className="pk-field" style={{ width: '100%' }}>
+                              <label>忽略比对字段（逗号分隔）</label>
+                              <input
+                                type="text"
+                                value={config.ignoreFields || ''}
+                                onChange={(e) => {
+                                  setSystemSettings(prev => ({
+                                    ...prev,
+                                    tables: {
+                                      ...prev.tables,
+                                      [tableName]: {
+                                        ...prev.tables[tableName],
+                                        ignoreFields: e.target.value
+                                      }
+                                    }
+                                  }));
+                                }}
+                                className="input"
+                                placeholder="输入配置字段，忽略SQL前后比对，如: create_time,update_time"
+                              />
+                            </div>
+                          </div>
                         </div>
                         
                         <h6>查询条件</h6>
@@ -3088,6 +3152,7 @@ function App() {
                                     className="input"
                                   >
                                     <option value="request">请求报文</option>
+                                    <option value="response">响应报文</option>
                                     <option value="route">路由结果</option>
                                     <option value="table">其他表</option>
                                   </select>
@@ -3414,6 +3479,29 @@ function App() {
                               </select>
                             </div>
                           </div>
+                          <div className="pk-dus-row" style={{ marginTop: '10px' }}>
+                            <div className="pk-field" style={{ width: '100%' }}>
+                              <label>忽略比对字段（逗号分隔）</label>
+                              <input
+                                type="text"
+                                value={config.ignoreFields || ''}
+                                onChange={(e) => {
+                                  setDefaultTableSettings(prev => ({
+                                    ...prev,
+                                    tables: {
+                                      ...prev.tables,
+                                      [tableName]: {
+                                        ...prev.tables[tableName],
+                                        ignoreFields: e.target.value
+                                      }
+                                    }
+                                  }));
+                                }}
+                                className="input"
+                                placeholder="输入配置字段，忽略SQL前后比对，如: create_time,update_time"
+                              />
+                            </div>
+                          </div>
                         </div>
                         
                         <h6>查询条件</h6>
@@ -3451,6 +3539,7 @@ function App() {
                                     className="input"
                                   >
                                     <option value="request">请求报文</option>
+                                    <option value="response">响应报文</option>
                                     <option value="route">路由结果</option>
                                     <option value="table">其他表</option>
                                   </select>
@@ -3705,6 +3794,63 @@ function App() {
             </div>
             <div className="modal-footer" style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end', paddingTop: '15px', borderTop: '1px solid var(--border-color)' }}>
               <button className="btn-secondary" onClick={() => setShowDataModal(false)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 关于弹窗 */}
+      {showAboutModal && (
+        <div className="modal-overlay" onClick={() => setShowAboutModal(false)}>
+          <div className="modal-content about-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3><span className="modal-icon">ℹ️</span> 关于自动化交易数据断言工具</h3>
+              <button className="btn-close" onClick={() => setShowAboutModal(false)}>×</button>
+            </div>
+            <div className="modal-body about-body">
+              <div className="about-hero">
+                <div className="about-logo">⇌</div>
+                <h2>自动化交易数据断言</h2>
+                <div className="about-version">版本: v1.0.27</div>
+                <div className="about-author">By <span>Taylor Zhu</span></div>
+              </div>
+              <div className="about-desc">
+                <p>这是一款为研发与测试团队量身打造的<strong>自动化交易数据一致性断言工具</strong>。</p>
+                <p>在传统接口测试中，校验数据落库是否正确往往需要手动连接各套数据库、手写各种复杂的查询 SQL，繁琐且极易出错。本项目致力于将“黑盒测试”透明化，打造一站式闭环数据核对体验。</p>
+                <p>只需在发起业务接口调用前后，工具会自动为您解析交易链路中涉及的所有数据表，并智能提取请求或响应报文中的关键业务主键（如客户号、介质号等），无缝进行前置与后置的数据快照对比！</p>
+              </div>
+              <div className="about-features">
+                <h4>✨ 核心能力与架构优势</h4>
+                <ul>
+                  <li>
+                    <strong><span>🔄</span> 智能路由与多库协同</strong>
+                    无论是分布式核心的 bdus 路由，还是管理组件的 bto/cdus 路由，系统均能自动解析请求主键，一键直达真实的物理分库分表。
+                  </li>
+                  <li>
+                    <strong><span>🗃️</span> 多环境一键穿透</strong>
+                    内置跨环境隔离机制，只需维护一套表配置，即可无缝穿梭不同测试环境的数据库体系，进行深度差异比对。
+                  </li>
+                  <li>
+                    <strong><span>🛡️</span> 双向条件推导引擎</strong>
+                    支持提取发送前“请求报文”的关键字段推导 SQL，也支持针对 Insert 场景从回调的“响应报文”中逆向提取自增主键等条件。
+                  </li>
+                  <li>
+                    <strong><span>📝</span> JMeter 压测无缝衔接</strong>
+                    支持一键导入 .jmx 自动化脚本，原生剥离 XML 节点内的 JSON Body 数据，完美衔接自测到专业压测的闭环流程。
+                  </li>
+                  <li>
+                    <strong><span>⚡</span> 极致本地性能</strong>
+                    采用 Local First 架构，配置基于 SQLite 持久存储。渲染进程与 Node.js 宿主进程分离，多进程并发处理查询。
+                  </li>
+                  <li>
+                    <strong><span>🎯</span> 灵活比对与容错</strong>
+                    支持精确到单个字段级别的比对规则配置。可随时配置“忽略比对字段”（如时间戳），精准保障核心业务级一致性断言。
+                  </li>
+                </ul>
+              </div>
+              <div className="about-footer-info">
+                基于 Electron / React / SQLite / Node.js 构建
+              </div>
             </div>
           </div>
         </div>

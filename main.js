@@ -218,20 +218,30 @@ class DataConsistencyChecker {
     }
   }
 
-  deepEqual(obj1, obj2) {
+  deepEqual(obj1, obj2, ignoreFields = []) {
     if (obj1 === obj2) return true;
     if (
       typeof obj1 !== 'object' ||
       obj1 === null ||
       typeof obj2 !== 'object' ||
       obj2 === null
-    )
+    ) {
       return false;
-    const keys1 = Object.keys(obj1);
-    const keys2 = Object.keys(obj2);
+    }
+
+    if (Array.isArray(obj1) && Array.isArray(obj2)) {
+      if (obj1.length !== obj2.length) return false;
+      for (let i = 0; i < obj1.length; i++) {
+        if (!this.deepEqual(obj1[i], obj2[i], ignoreFields)) return false;
+      }
+      return true;
+    }
+
+    const keys1 = Object.keys(obj1).filter(k => !ignoreFields.includes(k));
+    const keys2 = Object.keys(obj2).filter(k => !ignoreFields.includes(k));
     if (keys1.length !== keys2.length) return false;
     for (let key of keys1) {
-      if (!keys2.includes(key) || !this.deepEqual(obj1[key], obj2[key])) return false;
+      if (!keys2.includes(key) || !this.deepEqual(obj1[key], obj2[key], ignoreFields)) return false;
     }
     return true;
   }
@@ -407,7 +417,13 @@ class DataConsistencyChecker {
         }
         const beforeCount = before.count || 0;
         const afterCount = after.count || 0;
-        if (beforeCount === afterCount && this.deepEqual(before.data, after.data)) {
+        
+        let ignoreFields = [];
+        if (tableSettings[tableName] && tableSettings[tableName].ignoreFields) {
+          ignoreFields = tableSettings[tableName].ignoreFields.split(',').map(s => s.trim()).filter(Boolean);
+        }
+
+        if (beforeCount === afterCount && this.deepEqual(before.data, after.data, ignoreFields)) {
           addLog(`[${tableName}] ✓ 数据一致（${beforeCount} 条记录无变化）`);
           resultsArray.push({ table: tableName, status: '通过', message: '数据一致性检查通过', before, after, diff: null });
         } else {
