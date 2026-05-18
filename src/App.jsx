@@ -1,7 +1,44 @@
 import { useState, useRef, useEffect, useCallback, startTransition } from 'react';
 import axios from 'axios';
+import { JSONPath } from 'jsonpath-plus';
 import './App.css';
 import LoginScreen from './components/LoginScreen.jsx';
+
+const TableNameInput = ({ initialName, onNameChange, placeholder, className, style }) => {
+  const [name, setName] = useState(initialName);
+  
+  useEffect(() => {
+    setName(initialName);
+  }, [initialName]);
+  
+  const handleBlur = () => {
+    const newName = name.trim();
+    if (newName && newName !== initialName) {
+      onNameChange(initialName, newName);
+    } else {
+      setName(initialName);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.target.blur();
+    }
+  };
+
+  return (
+    <input
+      type="text"
+      value={name}
+      onChange={(e) => setName(e.target.value)}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
+      className={className}
+      placeholder={placeholder}
+      style={style}
+    />
+  );
+};
 
 function App() {
   const electronAPI = typeof window !== 'undefined' ? window.electronAPI : null;
@@ -18,7 +55,7 @@ function App() {
   });
   const [loginError, setLoginError] = useState('');
   const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [authApiBaseUrl, setAuthApiBaseUrl] = useState('http://localhost:8080/online-service');
+  const [authApiBaseUrl, setAuthApiBaseUrl] = useState('http://localhost:8080');
   const [captchaSrc, setCaptchaSrc] = useState('');
   const [captchaUuid, setCaptchaUuid] = useState('');
   const [captchaLoading, setCaptchaLoading] = useState(false);
@@ -457,16 +494,38 @@ function App() {
 
   const extractValue = (data, path) => {
     if (!data || !path) return null;
-    const keys = path.split('.');
-    let current = data;
-    for (const key of keys) {
-      if (typeof current === 'object' && key in current) {
-        current = current[key];
-      } else {
-        return null;
-      }
+    
+    let jsonPathQuery = path.trim();
+    if (!jsonPathQuery.startsWith('$')) {
+      // 补全前缀，使原有的 "txBody.list[0].id" 自动变成 "$.txBody.list[0].id"
+      jsonPathQuery = jsonPathQuery.startsWith('.') ? '$' + jsonPathQuery : '$.' + jsonPathQuery;
     }
-    return current;
+
+    try {
+      const results = JSONPath({ path: jsonPathQuery, json: data });
+      if (results && results.length > 0) {
+        // 若结果有多个（如使用 [*] 命中数组中所有项），默认取第一个具体值作为SQL查询条件
+        return results[0];
+      }
+    } catch (e) {
+      console.warn(`[JSONPath] 提取失败，路径: ${path}`, e);
+    }
+    
+    // 降级兜底：如果 JSONPath 未命中或发生异常，尝试使用原有的对象属性逐层读取逻辑（兼容某些包含特殊字符或关键字的路径）
+    try {
+      const keys = path.split('.');
+      let current = data;
+      for (const key of keys) {
+        if (current && typeof current === 'object' && key in current) {
+          current = current[key];
+        } else {
+          return null;
+        }
+      }
+      return current;
+    } catch (e) {
+      return null;
+    }
   };
 
   const tableConfigs = {
@@ -863,6 +922,9 @@ function App() {
               if (cond.source === 'request') {
                 value = extractValue(requestData, cond.path);
                 if (value) addLog(`[${tableName}] ${cond.field} = ${value}  (来自请求报文)`);
+              } else if (cond.source === 'custom') {
+                value = cond.customValue;
+                if (value !== undefined && value !== null) addLog(`[${tableName}] ${cond.field} = ${value}  (来自用户自定义)`);
               } else if (cond.source === 'route') {
                 if (cond.field === 'cust_no' || cond.field === 'zone_val') {
                   let mediumNoToQuery = null;
@@ -1137,7 +1199,7 @@ function App() {
   };
 
   const renderDataComparisonTable = () => {
-    const { beforeData, afterData } = dataModalContent;
+    const { title: tableName, beforeData, afterData } = dataModalContent;
     const allKeys = new Set();
     const maxLen = Math.max(beforeData.length, afterData.length);
     if (maxLen === 0) return null;
@@ -1146,6 +1208,15 @@ function App() {
     if (afterData[0]) Object.keys(afterData[0]).forEach(k => allKeys.add(k));
     
     const fields = Array.from(allKeys);
+
+    // 获取当前表的忽略字段配置（解决浅拷贝可能导致的丢失，并支持中英文逗号及大小写忽略）
+    const defaultTableConfig = defaultTableSettings.tables[tableName] || {};
+    const systemTableConfig = systemSettings.tables[tableName] || {};
+    const tableConfig = { ...defaultTableConfig, ...systemTableConfig };
+    
+    const ignoreFieldsStr = tableConfig.ignoreFields || '';
+    // 使用正则表达式兼容半角逗号和全角逗号，并统一转小写去除空格
+    const ignoreFieldsSet = new Set(ignoreFieldsStr.toLowerCase().split(/[,，]/).map(f => f.trim()).filter(Boolean));
 
     return (
       <div className="data-table-container" style={{ overflowX: 'auto', marginTop: '15px' }}>
@@ -1164,7 +1235,8 @@ function App() {
                 {fields.map(field => {
                   const bVal = beforeData[idx] ? beforeData[idx][field] : undefined;
                   const aVal = afterData[idx] ? afterData[idx][field] : undefined;
-                  const isDiff = bVal !== aVal;
+                  const isIgnored = ignoreFieldsSet.has(field.toLowerCase());
+                  const isDiff = !isIgnored && bVal !== aVal;
                   const fmtVal = (v) => v === undefined
                     ? <span style={{ opacity: 0.35 }}>—</span>
                     : v === null
@@ -1188,6 +1260,15 @@ function App() {
                             boxShadow: '0 0 8px rgba(255,64,64,0.55)',
                           }}>DIFF</span>
                         )}
+                        {isIgnored && bVal !== aVal && (
+                          <span style={{
+                            display: 'inline-block', marginRight: 7,
+                            padding: '1px 6px', borderRadius: 4,
+                            fontSize: 10, fontWeight: 700, lineHeight: 1.6,
+                            backgroundColor: 'var(--info-bg)', color: 'var(--info)',
+                            verticalAlign: 'middle', border: '1px solid var(--info)'
+                          }}>IGNORED</span>
+                        )}
                         {field}
                       </td>
                       {/* 接口前值 — 红色删除线 */}
@@ -1197,6 +1278,7 @@ function App() {
                         fontWeight: isDiff ? 600 : 400,
                         color: isDiff ? '#ff7070' : 'var(--text-secondary)',
                         textDecoration: isDiff ? 'line-through' : 'none',
+                        opacity: (isIgnored && bVal !== aVal) ? 0.6 : 1
                       }}>
                         {fmtVal(bVal)}
                       </td>
@@ -1206,6 +1288,7 @@ function App() {
                         fontFamily: isDiff ? 'monospace' : 'inherit',
                         fontWeight: isDiff ? 700 : 400,
                         color: isDiff ? '#f5a623' : 'var(--text-secondary)',
+                        opacity: (isIgnored && bVal !== aVal) ? 0.6 : 1
                       }}>
                         {isDiff && <span style={{ marginRight: 5, fontSize: 12, opacity: 0.8 }}>→</span>}
                         {fmtVal(aVal)}
@@ -1574,6 +1657,9 @@ function App() {
         lines.push(`source   = ${JSON.stringify(cond.source || 'request')}`);
         lines.push(`path     = ${JSON.stringify(cond.path || '')}`);
         lines.push(`required = ${cond.required ? 'true' : 'false'}`);
+        if (cond.customValue !== undefined) {
+          lines.push(`custom_value = ${JSON.stringify(cond.customValue)}`);
+        }
         if (cond.selectedTable) {
           lines.push(`selected_table = ${JSON.stringify(cond.selectedTable)}`);
         }
@@ -1604,6 +1690,9 @@ function App() {
         lines.push(`source   = ${JSON.stringify(cond.source || 'request')}`);
         lines.push(`path     = ${JSON.stringify(cond.path || '')}`);
         lines.push(`required = ${cond.required ? 'true' : 'false'}`);
+        if (cond.customValue !== undefined) {
+          lines.push(`custom_value = ${JSON.stringify(cond.customValue)}`);
+        }
         if (cond.selectedTable) {
           lines.push(`selected_table = ${JSON.stringify(cond.selectedTable)}`);
         }
@@ -1792,6 +1881,7 @@ function App() {
             source: c.source || 'request',
             path: c.path || '',
             required: Boolean(c.required),
+            ...(c.custom_value !== undefined ? { customValue: c.custom_value } : {}),
             ...(c.selected_table ? { selectedTable: c.selected_table } : {})
           }))
         };
@@ -1811,6 +1901,7 @@ function App() {
             source: c.source || 'request',
             path: c.path || '',
             required: Boolean(c.required),
+            ...(c.custom_value !== undefined ? { customValue: c.custom_value } : {}),
             ...(c.selected_table ? { selectedTable: c.selected_table } : {})
           }))
         };
@@ -2987,25 +3078,25 @@ function App() {
                   }).map(([tableName, config]) => (
                     <div key={tableName} className="table-config-card">
                       <div className="table-config-header">
-                        <input
-                          type="text"
-                          value={tableName}
-                          onChange={(e) => {
-                            const newTableName = e.target.value;
-                            if (newTableName && newTableName !== tableName) {
-                              setSystemSettings(prev => {
-                                const newSettings = { ...prev };
-                                const existing = newSettings.tables[tableName];
-                                if (existing) {
-                                  newSettings.tables = {
-                                    ...newSettings.tables,
-                                    [newTableName]: existing
-                                  };
-                                  delete newSettings.tables[tableName];
+                        <TableNameInput
+                          initialName={tableName}
+                          onNameChange={(oldName, newName) => {
+                            setSystemSettings(prev => {
+                              const newSettings = { ...prev };
+                              const existing = newSettings.tables[oldName];
+                              if (existing) {
+                                const updatedTables = {};
+                                for (const key of Object.keys(newSettings.tables)) {
+                                  if (key === oldName) {
+                                    updatedTables[newName] = existing;
+                                  } else {
+                                    updatedTables[key] = newSettings.tables[key];
+                                  }
                                 }
-                                return newSettings;
-                              });
-                            }
+                                newSettings.tables = updatedTables;
+                              }
+                              return newSettings;
+                            });
                           }}
                           className="input table-name-input"
                           placeholder="表名"
@@ -3155,6 +3246,7 @@ function App() {
                                     <option value="response">响应报文</option>
                                     <option value="route">路由结果</option>
                                     <option value="table">其他表</option>
+                                    <option value="custom">用户自定义值</option>
                                   </select>
                                 </div>
                               </div>
@@ -3201,6 +3293,25 @@ function App() {
                                     </div>
                                   </div>
                                 </>
+                              ) : condition.source === 'custom' ? (
+                                <div className="condition-field-row">
+                                  <div className="condition-field-item full-width">
+                                    <label>固定值</label>
+                                    <input
+                                      type="text"
+                                      value={condition.customValue || ''}
+                                      onChange={(e) => {
+                                        setSystemSettings(prev => {
+                                          const newSettings = { ...prev };
+                                          newSettings.tables[tableName].conditionFields[index].customValue = e.target.value;
+                                          return newSettings;
+                                        });
+                                      }}
+                                      className="input"
+                                      placeholder="输入固定值"
+                                    />
+                                  </div>
+                                </div>
                               ) : (
                                 <div className="condition-field-row">
                                   <div className="condition-field-item full-width">
@@ -3216,7 +3327,7 @@ function App() {
                                         });
                                       }}
                                       className="input"
-                                      placeholder="输入路径 (如: txBody.txEntity.mediumNo)"
+                                      placeholder="支持JSONPath (如: txBody.list[0].id 或 $.txBody.id)"
                                     />
                                   </div>
                                 </div>
@@ -3374,25 +3485,25 @@ function App() {
                   }).map(([tableName, config]) => (
                     <div key={tableName} className="table-config-card">
                       <div className="table-config-header">
-                        <input
-                          type="text"
-                          value={tableName}
-                          onChange={(e) => {
-                            const newTableName = e.target.value;
-                            if (newTableName && newTableName !== tableName) {
-                              setDefaultTableSettings(prev => {
-                                const newSettings = { ...prev };
-                                const existing = newSettings.tables[tableName];
-                                if (existing) {
-                                  newSettings.tables = {
-                                    ...newSettings.tables,
-                                    [newTableName]: existing
-                                  };
-                                  delete newSettings.tables[tableName];
+                        <TableNameInput
+                          initialName={tableName}
+                          onNameChange={(oldName, newName) => {
+                            setDefaultTableSettings(prev => {
+                              const newSettings = { ...prev };
+                              const existing = newSettings.tables[oldName];
+                              if (existing) {
+                                const updatedTables = {};
+                                for (const key of Object.keys(newSettings.tables)) {
+                                  if (key === oldName) {
+                                    updatedTables[newName] = existing;
+                                  } else {
+                                    updatedTables[key] = newSettings.tables[key];
+                                  }
                                 }
-                                return newSettings;
-                              });
-                            }
+                                newSettings.tables = updatedTables;
+                              }
+                              return newSettings;
+                            });
                           }}
                           className="input table-name-input"
                           placeholder="表名"
@@ -3542,6 +3653,7 @@ function App() {
                                     <option value="response">响应报文</option>
                                     <option value="route">路由结果</option>
                                     <option value="table">其他表</option>
+                                    <option value="custom">用户自定义值</option>
                                   </select>
                                 </div>
                               </div>
@@ -3588,6 +3700,25 @@ function App() {
                                     </div>
                                   </div>
                                 </>
+                              ) : condition.source === 'custom' ? (
+                                <div className="condition-field-row">
+                                  <div className="condition-field-item full-width">
+                                    <label>固定值</label>
+                                    <input
+                                      type="text"
+                                      value={condition.customValue || ''}
+                                      onChange={(e) => {
+                                        setDefaultTableSettings(prev => {
+                                          const newSettings = { ...prev };
+                                          newSettings.tables[tableName].conditionFields[index].customValue = e.target.value;
+                                          return newSettings;
+                                        });
+                                      }}
+                                      className="input"
+                                      placeholder="输入固定值"
+                                    />
+                                  </div>
+                                </div>
                               ) : (
                                 <div className="condition-field-row">
                                   <div className="condition-field-item full-width">
@@ -3603,7 +3734,7 @@ function App() {
                                         });
                                       }}
                                       className="input"
-                                      placeholder="输入路径 (如: txBody.txEntity.mediumNo)"
+                                      placeholder="支持JSONPath (如: txBody.list[0].id 或 $.txBody.id)"
                                     />
                                   </div>
                                 </div>
@@ -3804,14 +3935,14 @@ function App() {
         <div className="modal-overlay" onClick={() => setShowAboutModal(false)}>
           <div className="modal-content about-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-header">
-              <h3><span className="modal-icon">ℹ️</span> 关于自动化交易数据断言工具</h3>
+              <h3><span className="modal-icon">ℹ️</span> 关于</h3>
               <button className="btn-close" onClick={() => setShowAboutModal(false)}>×</button>
             </div>
             <div className="modal-body about-body">
               <div className="about-hero">
                 <div className="about-logo">⇌</div>
                 <h2>自动化交易数据断言</h2>
-                <div className="about-version">版本: v1.0.27</div>
+                <div className="about-version">版本: v1.0.28</div>
                 <div className="about-author">By <span>Taylor Zhu</span></div>
               </div>
               <div className="about-desc">

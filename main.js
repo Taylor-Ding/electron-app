@@ -353,7 +353,33 @@ class DataConsistencyChecker {
       const afterData = {};
       const afterResultsCache = {};
 
-      for (const tableName of tables) {
+      // ── 对 tables 做简单拓扑排序：保证被依赖的表先执行查询 ──────────────
+      const sortedTables = [];
+      const remaining = [...tables];
+      const maxPasses = tables.length + 1;
+      let pass = 0;
+      while (remaining.length > 0 && pass < maxPasses) {
+        pass++;
+        const nextRound = [];
+        for (const t of remaining) {
+          const deps = (tableSettings[t]?.conditionFields || [])
+            .filter(c => c.source === 'table')
+            .map(c => (c.path || '').split('.')[0])
+            .filter(Boolean);
+          const depsResolved = deps.every(d => sortedTables.includes(d) || !tables.includes(d));
+          if (depsResolved) {
+            sortedTables.push(t);
+          } else {
+            nextRound.push(t);
+          }
+        }
+        remaining.length = 0;
+        remaining.push(...nextRound);
+      }
+      // 若有循环依赖导致无法解析，把剩余的追加到末尾
+      for (const t of remaining) sortedTables.push(t);
+
+      for (const tableName of sortedTables) {
         addLog(tableName, 'TABLE');
 
         const baseConditions = { ...(tableConditions[tableName] || {}) };
@@ -372,6 +398,13 @@ class DataConsistencyChecker {
             if (depTable && depField && afterResultsCache[depTable]) {
               const val = afterResultsCache[depTable][depField];
               if (val !== undefined && val !== null) baseConditions[cond.field] = String(val);
+            } else if (depTable && depField && beforeData[depTable]?.data?.length > 0) {
+              // fallback：若 afterResultsCache 还没有，从 beforeData 的第一条记录中读取依赖值
+              const val = beforeData[depTable].data[0][depField];
+              if (val !== undefined && val !== null) {
+                baseConditions[cond.field] = String(val);
+                addLog(`[${tableName}] 跨表依赖 fallback（来自 before 快照）: ${cond.field} = ${val}（${depTable}.${depField}）`);
+              }
             }
           }
         }
@@ -408,8 +441,11 @@ class DataConsistencyChecker {
 
       const resultsArray = [];
       for (const tableName of tables) {
-        const before = beforeData[tableName] || {};
-        const after = afterData[tableName] || {};
+        // 前置数据：若 beforeData 中没有该表，说明该表依赖响应报文条件，前置阶段未查询
+        const beforeRaw = beforeData[tableName];
+        const afterRaw  = afterData[tableName];
+        const before = beforeRaw || { sql: '（该表依赖响应报文条件，前置阶段跳过查询）', count: 0, data: [] };
+        const after  = afterRaw  || { sql: '（查询条件不满足，本轮未执行后置查询）', count: 0, data: [] };
         if (before.error || after.error) {
           addLog(`[${tableName}] ✗ 查询出错`, 'ERROR');
           resultsArray.push({ table: tableName, status: '错误', message: before.error || after.error, before, after, diff: null });

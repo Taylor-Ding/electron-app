@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+package-lock.json
 .venv/
 env/
 venv/
@@ -48,9 +49,6 @@ __pycache__/
 # Temporary files
 scratch.py
 test_hash.mjs
-backend/cli_check.py
-backend/db_checker.js
-backend/hash_utils.js
 quick-git.sh
 release.py
 
