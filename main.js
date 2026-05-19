@@ -443,9 +443,9 @@ class DataConsistencyChecker {
       for (const tableName of tables) {
         // 前置数据：若 beforeData 中没有该表，说明该表依赖响应报文条件，前置阶段未查询
         const beforeRaw = beforeData[tableName];
-        const afterRaw  = afterData[tableName];
+        const afterRaw = afterData[tableName];
         const before = beforeRaw || { sql: '（该表依赖响应报文条件，前置阶段跳过查询）', count: 0, data: [] };
-        const after  = afterRaw  || { sql: '（查询条件不满足，本轮未执行后置查询）', count: 0, data: [] };
+        const after = afterRaw || { sql: '（查询条件不满足，本轮未执行后置查询）', count: 0, data: [] };
         if (before.error || after.error) {
           addLog(`[${tableName}] ✗ 查询出错`, 'ERROR');
           resultsArray.push({ table: tableName, status: '错误', message: before.error || after.error, before, after, diff: null });
@@ -453,7 +453,7 @@ class DataConsistencyChecker {
         }
         const beforeCount = before.count || 0;
         const afterCount = after.count || 0;
-        
+
         let ignoreFields = [];
         if (tableSettings[tableName] && tableSettings[tableName].ignoreFields) {
           ignoreFields = tableSettings[tableName].ignoreFields.split(',').map(s => s.trim()).filter(Boolean);

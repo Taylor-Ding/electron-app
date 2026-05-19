@@ -6,11 +6,11 @@ import LoginScreen from './components/LoginScreen.jsx';
 
 const TableNameInput = ({ initialName, onNameChange, placeholder, className, style }) => {
   const [name, setName] = useState(initialName);
-  
+
   useEffect(() => {
     setName(initialName);
   }, [initialName]);
-  
+
   const handleBlur = () => {
     const newName = name.trim();
     if (newName && newName !== initialName) {
@@ -137,6 +137,9 @@ function App() {
   const [tableSearchQuery, setTableSearchQuery] = useState('');
   const [defaultTableSearchQuery, setDefaultTableSearchQuery] = useState('');
   const [defaultTableSettings, setDefaultTableSettings] = useState({ tables: {} });
+  // 弹窗草稿：打开时复制当前配置，点「保存设置」才写入真实 state
+  const [draftSystemSettings, setDraftSystemSettings] = useState(null);
+  const [draftDefaultTableSettings, setDraftDefaultTableSettings] = useState(null);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [showJmxPicker, setShowJmxPicker] = useState(false);
   const [jmxRequests, setJmxRequests] = useState([]);
@@ -148,7 +151,7 @@ function App() {
   // 用于在异步函数中访问最新 state
   const systemDbConfigRef = useRef(null);
   const apiSettingsRef = useRef(null);
-  
+
   // API设置 - 不同环境的请求地址配置
   const [apiSettings, setApiSettings] = useState({
     route_url: 'http://20.12.12.121:8082/api/testtool/routeQuery', // 路由服务器地址，不受环境变化影响
@@ -490,7 +493,7 @@ function App() {
 
   const extractValue = (data, path) => {
     if (!data || !path) return null;
-    
+
     let jsonPathQuery = path.trim();
     if (!jsonPathQuery.startsWith('$')) {
       // 补全前缀，使原有的 "txBody.list[0].id" 自动变成 "$.txBody.list[0].id"
@@ -506,7 +509,7 @@ function App() {
     } catch (e) {
       console.warn(`[JSONPath] 提取失败，路径: ${path}`, e);
     }
-    
+
     // 降级兜底：如果 JSONPath 未命中或发生异常，尝试使用原有的对象属性逐层读取逻辑（兼容某些包含特殊字符或关键字的路径）
     try {
       const keys = path.split('.');
@@ -570,7 +573,7 @@ function App() {
                 addLog(`  警告: 无法从报文路径 ${condition.path} 提取到介质号`, 'WARN');
               }
             }
-            
+
             if (!mediumNoToQuery && routingKey && routingKey.type === 'medium_no') {
               mediumNoToQuery = routingKey.value;
               addLog(`  使用默认路由键提取介质号: ${mediumNoToQuery}`);
@@ -585,9 +588,9 @@ function App() {
                 }
                 addLog(`  调用路由查询接口: ${routeUrl}`);
                 addLog(`  查询参数: mediumNo = ${mediumNoToQuery}`);
-                
+
                 const routeResponse = await axios.get(routeUrl, { params: { mediumNo: mediumNoToQuery }, headers: { env: selectedEnvironment, 'X-Client-Type': 'DESKTOP' } });
-                
+
                 let respData = routeResponse.data;
                 value = null;
 
@@ -692,9 +695,45 @@ function App() {
         addLog('验证请求报文格式...');
         requestData = JSON.parse(requestBody);
         addLog('请求报文格式验证通过');
-      } catch {
-        addLog('请求报文格式错误', 'ERROR');
-        throw new Error('请求报文格式错误，请检查JSON格式');
+
+        // ---- 校验非 txHeader 部分不能含有 {{变量}} 占位符 ----
+        const PLACEHOLDER_RE = /\{\{[^}]+\}\}/g;
+        const checkForPlaceholders = (obj, path) => {
+          if (typeof obj === 'string') {
+            const matches = obj.match(PLACEHOLDER_RE);
+            if (matches) {
+              return matches.map(m => `${path} → ${m}`);
+            }
+            return [];
+          }
+          if (Array.isArray(obj)) {
+            return obj.flatMap((item, i) => checkForPlaceholders(item, `${path}[${i}]`));
+          }
+          if (obj && typeof obj === 'object') {
+            return Object.entries(obj).flatMap(([k, v]) => checkForPlaceholders(v, `${path}.${k}`));
+          }
+          return [];
+        };
+        // 只检查非 txHeader 的顶层键
+        const invalidPlaceholders = [];
+        for (const [topKey, topVal] of Object.entries(requestData)) {
+          if (topKey === 'txHeader') continue; // txHeader 允许有占位符（由系统自动填充）
+          const found = checkForPlaceholders(topVal, topKey);
+          invalidPlaceholders.push(...found);
+        }
+        if (invalidPlaceholders.length > 0) {
+          const detail = invalidPlaceholders.slice(0, 5).join('\n');
+          addLog(`报文校验失败：非 txHeader 区域存在未替换的变量占位符`, 'ERROR');
+          invalidPlaceholders.forEach(p => addLog(`  ✗ ${p}`, 'ERROR'));
+          throw new Error(
+            `请求报文校验失败：txBody 等非 txHeader 字段中存在 {{变量}} 占位符，请替换为实际值后重试。\n涉及字段：\n${detail}`
+          );
+        }
+        addLog('报文占位符校验通过（非 txHeader 区域无未替换变量）');
+      } catch (parseOrValidateErr) {
+        // JSON 解析失败或占位符校验失败，统一记录并中断
+        addLog(parseOrValidateErr.message || '报文校验失败', 'ERROR');
+        throw parseOrValidateErr;
       }
 
       // ---- 辅助：为报文生成并写入动态字段（时间戳、跟踪号、tenantId）----
@@ -902,12 +941,12 @@ function App() {
           const mergedTables = { ...defaultTableSettings.tables, ...systemSettings.tables };
           const config = mergedTables[tableName];
           if (!config) {
+            // 未配置表规则 → 跳过该表，继续处理其他表
             addLog(`[${tableName}] 未配置查询条件，跳过`, 'WARN');
             skippedTables.push(tableName);
             continue;
           }
           {
-            const table = { name: tableName };
             const conditions = {};
             for (const cond of config.conditionFields) {
               if (cond.source === 'table' || cond.source === 'response') {
@@ -930,7 +969,7 @@ function App() {
                       addLog(`[${tableName}] 警告: 无法从 ${cond.path} 提取介质号`, 'WARN');
                     }
                   }
-                  
+
                   if (!mediumNoToQuery && routingKey && routingKey.type === 'medium_no') {
                     mediumNoToQuery = routingKey.value;
                   }
@@ -954,7 +993,7 @@ function App() {
                           addLog(`[${tableName}] 解析路由响应失败: ${e.message}`, 'WARN');
                         }
                       }
-                      
+
                       if (value === undefined || value === null) {
                         if (cond.field === 'cust_no') {
                           value = respData?.custNo !== undefined ? respData?.custNo : respData?.cust_no;
@@ -969,11 +1008,18 @@ function App() {
 
                       if (!value || typeof value !== 'string') throw new Error(`路由响应中无法提取 ${cond.field}: ${JSON.stringify(routeResponse.data)}`);
                       addLog(`[${tableName}] ${cond.field} = ${value}  (来自路由查询)`);
-                    } catch (error) {
-                      addLog(`[${tableName}] 路由查询失败: ${error.message}`, 'ERROR');
+                    } catch (routeErr) {
+                      addLog(`[${tableName}] 路由查询失败: ${routeErr.message}`, 'ERROR');
+                      // 路由查询失败时，如果该字段是必填，向上抛出中断任务
+                      if (cond.required) {
+                        throw new Error(`[${tableName}] 必填字段 [${cond.field}] 路由查询失败，任务终止: ${routeErr.message}`);
+                      }
                     }
                   } else {
                     addLog(`[${tableName}] 无法获取介质号，跳过路由查询`, 'ERROR');
+                    if (cond.required) {
+                      throw new Error(`[${tableName}] 必填字段 [${cond.field}] 无法获取介质号，任务终止`);
+                    }
                   }
                 } else {
                   if (routingKey) {
@@ -985,15 +1031,18 @@ function App() {
               if (value !== null && value !== undefined) {
                 conditions[cond.field] = value;
               } else if (cond.required) {
-                addLog(`[${tableName}] 必填字段 ${cond.field} 无法提取`, 'ERROR');
+                // 必填字段无法提取 → 中断任务，不继续执行
+                addLog(`[${tableName}] 必填字段 [${cond.field}] 无法提取到值，中断任务`, 'ERROR');
+                throw new Error(`[${tableName}] 必填字段 [${cond.field}] 无法提取到值，任务终止。请检查表配置中的条件路径是否正确`);
               }
             }
             tableConditions[tableName] = conditions;
             addLog(`[${tableName}] 查询条件就绪: ${JSON.stringify(conditions)}`);
           }
         } catch (condError) {
-          addLog(`[${tableName}] 条件提取失败: ${condError.message}`, 'ERROR');
-          tableConditions[tableName] = {};
+          // 向上抛出，由外层 catch 统一处理，保持在日志页不跳转
+          addLog(`条件提取阶段中断: ${condError.message}`, 'ERROR');
+          throw condError;
         }
       }
 
@@ -1007,7 +1056,7 @@ function App() {
         const config = mergedTables[tableName];
         return config?.conditionFields?.some(c => c.source === 'response');
       };
-      
+
       const beforeTablesToCheck = tablesToCheck.filter(t => !hasResponseCond(t));
       const afterTablesToCheck = tablesToCheck;
 
@@ -1206,7 +1255,7 @@ function App() {
 
     if (beforeData[0]) Object.keys(beforeData[0]).forEach(k => allKeys.add(k));
     if (afterData[0]) Object.keys(afterData[0]).forEach(k => allKeys.add(k));
-    
+
     const fields = Array.from(allKeys);
     const dropdownOptions = fields.filter(field => field.toLowerCase().includes(dataModalSearchQuery.toLowerCase()));
     const tableFieldsToShow = selectedFields.length > 0 ? fields.filter(f => selectedFields.includes(f)) : fields;
@@ -1215,7 +1264,7 @@ function App() {
     const defaultTableConfig = defaultTableSettings.tables[tableName] || {};
     const systemTableConfig = systemSettings.tables[tableName] || {};
     const tableConfig = { ...defaultTableConfig, ...systemTableConfig };
-    
+
     const ignoreFieldsStr = tableConfig.ignoreFields || '';
     // 使用正则表达式兼容半角逗号和全角逗号，并统一转小写去除空格
     const ignoreFieldsSet = new Set(ignoreFieldsStr.toLowerCase().split(/[,，]/).map(f => f.trim()).filter(Boolean));
@@ -1233,7 +1282,7 @@ function App() {
     const toggleFieldSelection = (field) => {
       setSelectedFields(prev => prev.includes(field) ? prev.filter(f => f !== field) : [...prev, field]);
     };
-    
+
     const removeFieldSelection = (field, e) => {
       e.stopPropagation();
       setSelectedFields(prev => prev.filter(f => f !== field));
@@ -1243,10 +1292,10 @@ function App() {
       <div className="data-table-container" style={{ overflowX: 'auto', marginTop: '15px' }}>
         <div style={{ marginBottom: '20px', position: 'sticky', top: '-10px', zIndex: 20, background: 'var(--bg-color)', padding: '10px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
           <div style={{ position: 'relative' }}>
-            <div 
-              style={{ 
+            <div
+              style={{
                 display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px',
-                width: '100%', minHeight: '44px', padding: '6px 42px', borderRadius: '10px', 
+                width: '100%', minHeight: '44px', padding: '6px 42px', borderRadius: '10px',
                 border: '1px solid', borderColor: isDropdownOpen ? '#007aff' : 'var(--border-color)',
                 backgroundColor: 'var(--bg-lighter)', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                 boxShadow: isDropdownOpen ? '0 0 0 4px rgba(0, 122, 255, 0.15)' : '0 2px 8px rgba(0,0,0,0.1)',
@@ -1260,12 +1309,12 @@ function App() {
 
               {selectedFields.map(field => (
                 <span key={field} style={{
-                  display: 'flex', alignItems: 'center', backgroundColor: 'rgba(0, 122, 255, 0.15)', 
-                  color: '#4a90e2', padding: '4px 10px', borderRadius: '8px', fontSize: '13px', 
+                  display: 'flex', alignItems: 'center', backgroundColor: 'rgba(0, 122, 255, 0.15)',
+                  color: '#4a90e2', padding: '4px 10px', borderRadius: '8px', fontSize: '13px',
                   fontWeight: '600', border: '1px solid rgba(0, 122, 255, 0.2)', userSelect: 'none'
                 }}>
                   {field}
-                  <span 
+                  <span
                     onClick={(e) => removeFieldSelection(field, e)}
                     style={{ marginLeft: '6px', cursor: 'pointer', display: 'flex', opacity: 0.7, padding: '2px', borderRadius: '50%', backgroundColor: 'rgba(0,0,0,0.1)' }}
                     onMouseEnter={(e) => e.currentTarget.style.opacity = 1}
@@ -1285,14 +1334,14 @@ function App() {
                   setIsDropdownOpen(true);
                 }}
                 onFocus={() => setIsDropdownOpen(true)}
-                style={{ 
+                style={{
                   flex: 1, minWidth: '150px', border: 'none', background: 'transparent',
                   color: 'var(--text-primary)', fontSize: '15px', outline: 'none', padding: '4px 0'
                 }}
               />
 
               {(selectedFields.length > 0 || dataModalSearchQuery) && (
-                <span 
+                <span
                   style={{ position: 'absolute', right: '16px', top: '12px', color: '#aaa', cursor: 'pointer', padding: '4px', display: 'flex' }}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -1310,7 +1359,7 @@ function App() {
 
             {isDropdownOpen && (
               <>
-                <div 
+                <div
                   style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 20 }}
                   onClick={(e) => { e.stopPropagation(); setIsDropdownOpen(false); }}
                 />
@@ -1331,7 +1380,7 @@ function App() {
                     dropdownOptions.map(field => {
                       const isSelected = selectedFields.includes(field);
                       return (
-                        <div 
+                        <div
                           key={field}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1364,141 +1413,143 @@ function App() {
         {Array.from({ length: maxLen }).map((_, idx) => {
           const isExpanded = expandedRecords[idx] !== false; // 默认展开
           return (
-          <div key={idx} style={{ marginBottom: '24px' }}>
-            {maxLen > 1 && (
-              <div 
-                style={{
-                  marginBottom: '12px',
-                  padding: '12px 18px',
-                  backgroundColor: 'var(--bg-lighter)',
-                  border: '1px solid var(--border-color)',
-                  borderRadius: '10px',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  userSelect: 'none',
-                  transition: 'background-color 0.25s, box-shadow 0.25s',
-                }}
-                onClick={() => toggleRecord(idx)}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.08)';
-                  e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = 'var(--bg-lighter)';
-                  e.currentTarget.style.boxShadow = 'none';
-                }}
-                title="点击折叠/展开"
-              >
-                <div style={{ display: 'flex', alignItems: 'center', fontWeight: '600', color: 'var(--text-primary)', fontSize: '15px' }}>
-                  <span style={{ 
-                    marginRight: '14px', 
-                    transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', 
-                    transition: 'transform 0.35s cubic-bezier(0.4, 0, 0.2, 1)', 
+            <div key={idx} style={{ marginBottom: '24px' }}>
+              {maxLen > 1 && (
+                <div
+                  style={{
+                    marginBottom: '12px',
+                    padding: '12px 18px',
+                    backgroundColor: 'var(--bg-lighter)',
+                    border: '1px solid var(--border-color)',
+                    borderRadius: '10px',
+                    cursor: 'pointer',
                     display: 'flex',
                     alignItems: 'center',
-                    justifyContent: 'center',
-                    width: '26px',
-                    height: '26px',
-                    borderRadius: '50%',
-                    backgroundColor: 'rgba(255,255,255,0.06)'
-                  }}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                  </span>
-                  数据对比组 {idx + 1}
-                </div>
-                <span style={{ fontSize: '12px', fontWeight: '500', color: 'var(--text-secondary)', backgroundColor: 'rgba(0,0,0,0.25)', padding: '4px 10px', borderRadius: '12px' }}>
-                  {isExpanded ? '点击折叠' : '点击展开'}
-                </span>
-              </div>
-            )}
-            {isExpanded && (
-            <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
-              <thead>
-                <tr>
-                  <th style={{ padding: '10px 12px', borderBottom: '2px solid var(--border-color)', backgroundColor: 'var(--bg-lighter)', textAlign: 'left', whiteSpace: 'nowrap', color: 'var(--text-secondary)', width: '20%' }}>字段名称</th>
-                  <th style={{ padding: '10px 12px', borderBottom: '2px solid var(--border-color)', backgroundColor: 'var(--bg-lighter)', textAlign: 'left', whiteSpace: 'nowrap', color: 'var(--text-secondary)', width: '40%' }}>执行前数据</th>
-                  <th style={{ padding: '10px 12px', borderBottom: '2px solid var(--border-color)', backgroundColor: 'var(--bg-lighter)', textAlign: 'left', whiteSpace: 'nowrap', color: 'var(--text-secondary)', width: '40%' }}>执行后数据</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tableFieldsToShow.map(field => {
-                  const bVal = beforeData[idx] ? beforeData[idx][field] : undefined;
-                  const aVal = afterData[idx] ? afterData[idx][field] : undefined;
-                  const isIgnored = ignoreFieldsSet.has(field.toLowerCase());
-                  const isDiff = !isIgnored && bVal !== aVal;
-                  const fmtVal = (v) => v === undefined
-                    ? <span style={{ opacity: 0.35 }}>—</span>
-                    : v === null
-                      ? <span style={{ fontStyle: 'italic', opacity: 0.45 }}>NULL</span>
-                      : String(v);
-                  return (
-                    <tr key={field} style={{
-                      borderBottom: isDiff ? '1px solid rgba(255,80,80,0.3)' : '1px solid var(--border-color)',
-                      backgroundColor: isDiff ? 'rgba(255,50,50,0.14)' : 'transparent',
-                      borderLeft: isDiff ? '4px solid #ff4040' : '4px solid transparent',
+                    justifyContent: 'space-between',
+                    userSelect: 'none',
+                    transition: 'background-color 0.25s, box-shadow 0.25s',
+                  }}
+                  onClick={() => toggleRecord(idx)}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = 'rgba(255, 255, 255, 0.08)';
+                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = 'var(--bg-lighter)';
+                    e.currentTarget.style.boxShadow = 'none';
+                  }}
+                  title="点击折叠/展开"
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', fontWeight: '600', color: 'var(--text-primary)', fontSize: '15px' }}>
+                    <span style={{
+                      marginRight: '14px',
+                      transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                      transition: 'transform 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      width: '26px',
+                      height: '26px',
+                      borderRadius: '50%',
+                      backgroundColor: 'rgba(255,255,255,0.06)'
                     }}>
-                      {/* 字段名 */}
-                      <td style={{ padding: '10px 12px', whiteSpace: 'nowrap', fontWeight: isDiff ? 700 : 500, color: isDiff ? '#ff5555' : 'var(--text-secondary)' }}>
-                        {isDiff && (
-                          <span style={{
-                            display: 'inline-block', marginRight: 7,
-                            padding: '1px 6px', borderRadius: 4,
-                            fontSize: 10, fontWeight: 800, lineHeight: 1.6,
-                            backgroundColor: '#ff4040', color: '#fff',
-                            verticalAlign: 'middle',
-                            boxShadow: '0 0 8px rgba(255,64,64,0.55)',
-                          }}>DIFF</span>
-                        )}
-                        {isIgnored && bVal !== aVal && (
-                          <span style={{
-                            display: 'inline-block', marginRight: 7,
-                            padding: '1px 6px', borderRadius: 4,
-                            fontSize: 10, fontWeight: 700, lineHeight: 1.6,
-                            backgroundColor: 'var(--info-bg)', color: 'var(--info)',
-                            verticalAlign: 'middle', border: '1px solid var(--info)'
-                          }}>IGNORED</span>
-                        )}
-                        {field}
-                      </td>
-                      {/* 接口前值 — 红色删除线 */}
-                      <td style={{
-                        padding: '10px 12px', wordBreak: 'break-all',
-                        fontFamily: isDiff ? 'monospace' : 'inherit',
-                        fontWeight: isDiff ? 600 : 400,
-                        color: isDiff ? '#ff7070' : 'var(--text-secondary)',
-                        textDecoration: isDiff ? 'line-through' : 'none',
-                        opacity: (isIgnored && bVal !== aVal) ? 0.6 : 1
-                      }}>
-                        {fmtVal(bVal)}
-                      </td>
-                      {/* 接口后值 — 绿色加粗 */}
-                      <td style={{
-                        padding: '10px 12px', wordBreak: 'break-all',
-                        fontFamily: isDiff ? 'monospace' : 'inherit',
-                        fontWeight: isDiff ? 700 : 400,
-                        color: isDiff ? '#f5a623' : 'var(--text-secondary)',
-                        opacity: (isIgnored && bVal !== aVal) ? 0.6 : 1
-                      }}>
-                        {isDiff && <span style={{ marginRight: 5, fontSize: 12, opacity: 0.8 }}>→</span>}
-                        {fmtVal(aVal)}
-                      </td>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    </span>
+                    数据对比组 {idx + 1}
+                  </div>
+                  <span style={{ fontSize: '12px', fontWeight: '500', color: 'var(--text-secondary)', backgroundColor: 'rgba(0,0,0,0.25)', padding: '4px 10px', borderRadius: '12px' }}>
+                    {isExpanded ? '点击折叠' : '点击展开'}
+                  </span>
+                </div>
+              )}
+              {isExpanded && (
+                <table className="data-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '14px' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ padding: '10px 12px', borderBottom: '2px solid var(--border-color)', backgroundColor: 'var(--bg-lighter)', textAlign: 'left', whiteSpace: 'nowrap', color: 'var(--text-secondary)', width: '20%' }}>字段名称</th>
+                      <th style={{ padding: '10px 12px', borderBottom: '2px solid var(--border-color)', backgroundColor: 'var(--bg-lighter)', textAlign: 'left', whiteSpace: 'nowrap', color: 'var(--text-secondary)', width: '40%' }}>执行前数据</th>
+                      <th style={{ padding: '10px 12px', borderBottom: '2px solid var(--border-color)', backgroundColor: 'var(--bg-lighter)', textAlign: 'left', whiteSpace: 'nowrap', color: 'var(--text-secondary)', width: '40%' }}>执行后数据</th>
                     </tr>
-                  );
-                })}
-                {tableFieldsToShow.length === 0 && (
-                  <tr>
-                    <td colSpan="3" style={{ textAlign: 'center', padding: '20px', color: 'var(--text-secondary)' }}>
-                      未找到匹配的字段
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-            )}
-          </div>
-        );
+                  </thead>
+                  <tbody>
+                    {tableFieldsToShow.map(field => {
+                      const hasBeforeRecord = beforeData && beforeData[idx] !== undefined;
+                      const bVal = hasBeforeRecord ? beforeData[idx][field] : undefined;
+                      const aVal = afterData[idx] ? afterData[idx][field] : undefined;
+                      const isIgnored = ignoreFieldsSet.has(field.toLowerCase());
+                      const isDiff = !isIgnored && hasBeforeRecord && bVal !== aVal;
+                      const isNewDataOnly = !hasBeforeRecord && aVal !== undefined;
+                      const fmtVal = (v) => v === undefined
+                        ? <span style={{ opacity: 0.35 }}>—</span>
+                        : v === null
+                          ? <span style={{ fontStyle: 'italic', opacity: 0.45 }}>NULL</span>
+                          : String(v);
+                      return (
+                        <tr key={field} style={{
+                          borderBottom: isDiff ? '1px solid rgba(255,80,80,0.3)' : '1px solid var(--border-color)',
+                          backgroundColor: isDiff ? 'rgba(255,50,50,0.14)' : 'transparent',
+                          borderLeft: isDiff ? '4px solid #ff4040' : '4px solid transparent',
+                        }}>
+                          {/* 字段名 */}
+                          <td style={{ padding: '10px 12px', whiteSpace: 'nowrap', fontWeight: isDiff ? 700 : 500, color: isDiff ? '#ff5555' : 'var(--text-secondary)' }}>
+                            {isDiff && (
+                              <span style={{
+                                display: 'inline-block', marginRight: 7,
+                                padding: '1px 6px', borderRadius: 4,
+                                fontSize: 10, fontWeight: 800, lineHeight: 1.6,
+                                backgroundColor: '#ff4040', color: '#fff',
+                                verticalAlign: 'middle',
+                                boxShadow: '0 0 8px rgba(255,64,64,0.55)',
+                              }}>DIFF</span>
+                            )}
+                            {isIgnored && hasBeforeRecord && bVal !== aVal && (
+                              <span style={{
+                                display: 'inline-block', marginRight: 7,
+                                padding: '1px 6px', borderRadius: 4,
+                                fontSize: 10, fontWeight: 700, lineHeight: 1.6,
+                                backgroundColor: 'var(--info-bg)', color: 'var(--info)',
+                                verticalAlign: 'middle', border: '1px solid var(--info)'
+                              }}>IGNORED</span>
+                            )}
+                            {field}
+                          </td>
+                          {/* 接口前值 — 红色删除线 */}
+                          <td style={{
+                            padding: '10px 12px', wordBreak: 'break-all',
+                            fontFamily: isDiff ? 'monospace' : 'inherit',
+                            fontWeight: isDiff ? 600 : 400,
+                            color: isDiff ? '#ff7070' : 'var(--text-secondary)',
+                            textDecoration: isDiff ? 'line-through' : 'none',
+                            opacity: (isIgnored && hasBeforeRecord && bVal !== aVal) ? 0.6 : 1
+                          }}>
+                            {fmtVal(bVal)}
+                          </td>
+                          {/* 接口后值 — 绿色/蓝色加粗 */}
+                          <td style={{
+                            padding: '10px 12px', wordBreak: 'break-all',
+                            fontFamily: isDiff || isNewDataOnly ? 'monospace' : 'inherit',
+                            fontWeight: isDiff || isNewDataOnly ? 700 : 400,
+                            color: isDiff ? '#f5a623' : (isNewDataOnly ? '#4a90e2' : 'var(--text-secondary)'),
+                            opacity: (isIgnored && hasBeforeRecord && bVal !== aVal) ? 0.6 : 1
+                          }}>
+                            {isDiff && <span style={{ marginRight: 5, fontSize: 12, opacity: 0.8 }}>→</span>}
+                            {fmtVal(aVal)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {tableFieldsToShow.length === 0 && (
+                      <tr>
+                        <td colSpan="3" style={{ textAlign: 'center', padding: '20px', color: 'var(--text-secondary)' }}>
+                          未找到匹配的字段
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          );
         })}
       </div>
     );
@@ -1548,11 +1599,15 @@ function App() {
 
   const handleSystemSettingsClick = () => {
     setShowSettingsDropdown(false);
+    // 深拷贝当前配置到草稿，弹窗内修改只写草稿
+    setDraftSystemSettings(JSON.parse(JSON.stringify(systemSettings)));
     setShowSystemSettings(true);
   };
 
   const handleDefaultTableSettingsClick = () => {
     setShowSettingsDropdown(false);
+    // 深拷贝当前配置到草稿
+    setDraftDefaultTableSettings(JSON.parse(JSON.stringify(defaultTableSettings)));
     setShowDefaultTableSettings(true);
   };
 
@@ -1621,9 +1676,9 @@ function App() {
   // 测试系统级数据库连接
   const handleTestSystemDbConnection = async (e) => {
     e.preventDefault();
-    
+
     const { host, port, database, user, password } = systemDbConfig;
-    
+
     if (!host || !database || !user) {
       alert('错误: 请填写完整的数据库信息');
       return;
@@ -1636,19 +1691,19 @@ function App() {
     }));
 
     addLog(`开始测试系统级数据库连接: ${host}:${port}/${database}`);
-    
+
     try {
       // 模拟连接测试
       await new Promise(resolve => setTimeout(resolve, 1500));
-      
+
       // 设置连接成功状态
       setTestConnectionStatus(prev => ({
         ...prev,
         'system': 'success'
       }));
-      
+
       addLog('系统级数据库连接测试成功', 'INFO');
-      
+
       // 3秒后重置状态
       setTimeout(() => {
         setTestConnectionStatus(prev => {
@@ -1663,9 +1718,9 @@ function App() {
         ...prev,
         'system': 'error'
       }));
-      
+
       addLog(`系统级数据库连接测试失败: ${error.message}`, 'ERROR');
-      
+
       // 3秒后重置状态
       setTimeout(() => {
         setTestConnectionStatus(prev => {
@@ -1693,32 +1748,50 @@ function App() {
   };
 
   const handleSaveSystemSettings = () => {
-    if (window.electronAPI) window.electronAPI.setConfig('systemSettings', JSON.stringify(systemSettings));
+    // 将草稿提交为真实 state
+    const committed = draftSystemSettings || systemSettings;
+    setSystemSettings(committed);
+    if (window.electronAPI) window.electronAPI.setConfig('systemSettings', JSON.stringify(committed));
     if (electronAPI) {
       try {
-        electronAPI.saveTableSettings(systemSettings.tables)
+        electronAPI.saveTableSettings(committed.tables)
           .catch(e => console.warn('[renderer] save-table-settings failed:', e));
       } catch (e) {
         console.warn('[renderer] ipc not available:', e);
       }
     }
+    setDraftSystemSettings(null);
     setShowSystemSettings(false);
     addLog('系统配置保存成功');
   };
 
+  const handleCancelSystemSettings = () => {
+    setDraftSystemSettings(null);
+    setShowSystemSettings(false);
+  };
+
   const handleSaveDefaultTableSettings = () => {
-    if (window.electronAPI) window.electronAPI.setConfig('defaultTableSettings', JSON.stringify(defaultTableSettings));
+    // 将草稿提交为真实 state
+    const committed = draftDefaultTableSettings || defaultTableSettings;
+    setDefaultTableSettings(committed);
+    if (window.electronAPI) window.electronAPI.setConfig('defaultTableSettings', JSON.stringify(committed));
     if (electronAPI) {
       try {
-        const mergedTables = { ...defaultTableSettings.tables, ...systemSettings.tables };
+        const mergedTables = { ...committed.tables, ...systemSettings.tables };
         electronAPI.saveTableSettings(mergedTables)
           .catch(e => console.warn('[renderer] save-table-settings failed:', e));
       } catch (e) {
         console.warn('[renderer] ipc not available:', e);
       }
     }
+    setDraftDefaultTableSettings(null);
     setShowDefaultTableSettings(false);
     addLog('默认表配置保存成功');
+  };
+
+  const handleCancelDefaultTableSettings = () => {
+    setDraftDefaultTableSettings(null);
+    setShowDefaultTableSettings(false);
   };
 
   // ===== TOML 序列化/反序列化工具 =====
@@ -1963,7 +2036,7 @@ function App() {
         if (/^-?\d+$/.test(raw)) return parseInt(raw, 10);
         if (/^-?\d+\.\d+$/.test(raw)) return parseFloat(raw);
         if ((raw.startsWith('"') && raw.endsWith('"')) ||
-            (raw.startsWith("'") && raw.endsWith("'"))) {
+          (raw.startsWith("'") && raw.endsWith("'"))) {
           return raw.slice(1, -1)
             .replace(/\\\\/g, '\\')
             .replace(/\\"/g, '"')
@@ -2119,7 +2192,7 @@ function App() {
     try {
       const tomlContent = serializeToToml(systemSettings, defaultTableSettings, apiSettings, dbSettings, systemDbConfig);
       const now = new Date();
-      const stamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
+      const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
       const prefix = isDefault === true ? 'autotest_default_config' : 'autotest_config';
       const filename = `${prefix}_${stamp}.toml`;
 
@@ -2212,7 +2285,7 @@ function App() {
 
   const handleTestConnection = async (env, index, e) => {
     e.preventDefault();
-    
+
     const dataSource = dbSettings[env]?.[index];
     if (!dataSource) {
       alert('错误: 数据源不存在');
@@ -2220,7 +2293,7 @@ function App() {
     }
 
     const { host, port, database, user, password } = dataSource;
-    
+
     if (!host || !database || !user) {
       alert('错误: 请填写完整的数据库信息');
       return;
@@ -2233,23 +2306,23 @@ function App() {
     }));
 
     addLog(`开始测试数据库连接: ${host}:${port}/${database}`);
-    
+
     try {
       // 这里可以使用axios或其他方式测试连接
       // 由于是前端环境，我们可以模拟连接测试
       // 实际项目中可能需要通过后端API来测试
-      
+
       // 模拟连接测试
       await new Promise(resolve => setTimeout(resolve, 1500));
-      
+
       // 设置连接成功状态
       setTestConnectionStatus(prev => ({
         ...prev,
         [`${env}-${index}`]: 'success'
       }));
-      
+
       addLog('数据库连接测试成功', 'INFO');
-      
+
       // 3秒后重置状态
       setTimeout(() => {
         setTestConnectionStatus(prev => {
@@ -2264,9 +2337,9 @@ function App() {
         ...prev,
         [`${env}-${index}`]: 'error'
       }));
-      
+
       addLog(`数据库连接测试失败: ${error.message}`, 'ERROR');
-      
+
       // 3秒后重置状态
       setTimeout(() => {
         setTestConnectionStatus(prev => {
@@ -2291,7 +2364,7 @@ function App() {
 
     // 添加点击事件监听器
     document.addEventListener('mousedown', handleClickOutside);
-    
+
     // 清理函数
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
@@ -2330,11 +2403,11 @@ function App() {
       };
 
       const testname = sampler.getAttribute('testname') || `请求 ${idx + 1}`;
-      const protocol  = getProp('HTTPSampler.protocol') || 'http';
-      const domain    = getProp('HTTPSampler.domain');
-      const port      = getProp('HTTPSampler.port');
-      const path      = getProp('HTTPSampler.path');
-      const method    = getProp('HTTPSampler.method') || 'POST';
+      const protocol = getProp('HTTPSampler.protocol') || 'http';
+      const domain = getProp('HTTPSampler.domain');
+      const port = getProp('HTTPSampler.port');
+      const path = getProp('HTTPSampler.path');
+      const method = getProp('HTTPSampler.method') || 'POST';
       const isRawBody = getProp('HTTPSampler.postBodyRaw', 'boolProp') === 'true';
 
       let body = '';
@@ -2357,7 +2430,7 @@ function App() {
           'collectionProp[name="Arguments.arguments"] > elementProp'
         );
         argItems.forEach(item => {
-          const nameEl  = item.querySelector('stringProp[name="Argument.name"]');
+          const nameEl = item.querySelector('stringProp[name="Argument.name"]');
           const valueEl = item.querySelector('stringProp[name="Argument.value"]');
           if (nameEl && valueEl && nameEl.textContent.trim()) {
             params[nameEl.textContent.trim()] = valueEl.textContent.trim();
@@ -2412,7 +2485,7 @@ function App() {
   const cleanJmxBody = (raw) => {
     if (!raw) return '';
     let s = String(raw);
-    
+
     // 1. 去除 BOM 和统一换行
     s = s.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     s = s.trim();
@@ -2428,25 +2501,25 @@ function App() {
       const lines = s.split('\n')
         .map(l => l.trim()) // 强制去除首尾空白（避免隐藏空白符导致空行存留）
         .filter(l => l !== ''); // 彻底干掉空行
-        
+
       let indentLevel = 0;
       const formatted = [];
-      
+
       for (const line of lines) {
         // 如果这行以关闭括号开头，先减少缩进
         if (line.match(/^[}\]]/)) {
           indentLevel = Math.max(0, indentLevel - 1);
         }
-        
+
         formatted.push('  '.repeat(indentLevel) + line);
-        
+
         // 计算行内大括号、方括号带来的缩进变化
         const openCount = (line.match(/[{[]/g) || []).length;
         const closeCount = (line.match(/[}\]]/g) || []).length;
         indentLevel += (openCount - closeCount);
         indentLevel = Math.max(0, indentLevel);
       }
-      
+
       return formatted.join('\n');
     }
   };
@@ -2464,7 +2537,7 @@ function App() {
   useEffect(() => {
     async function loadAllSettings() {
       if (!window.electronAPI) return;
-      
+
       try {
         const savedAuthApiBaseUrl = await window.electronAPI.getConfig('authApiBaseUrl');
         if (savedAuthApiBaseUrl) setAuthApiBaseUrl(savedAuthApiBaseUrl);
@@ -2560,7 +2633,7 @@ function App() {
       const t = setTimeout(() => { fetchApiSettingsFromDb(); }, 200);
       return () => clearTimeout(t);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authUser]);
 
   if (!authUser) {
@@ -2611,7 +2684,7 @@ function App() {
               {apiStatus === 'loading' ? '加载中' : apiStatus === 'error' ? '连接失败' : '就绪'}
             </span>
           </div>
-          
+
           {/* 明暗主题切换按钮 */}
           <button
             className={`btn-theme-toggle ${isDarkMode ? 'mode-dark' : 'mode-light'}`}
@@ -2626,8 +2699,8 @@ function App() {
 
           {/* 环境选择按钮 */}
           <div className="dropdown-container" ref={envDropdownRef}>
-            <button 
-              className="btn-env" 
+            <button
+              className="btn-env"
               onClick={() => setShowEnvironmentDropdown(!showEnvironmentDropdown)}
             >
               {selectedEnvironment}
@@ -2636,8 +2709,8 @@ function App() {
             {showEnvironmentDropdown && (
               <div className="dropdown-menu">
                 {environmentOptions.map((env) => (
-                  <button 
-                    key={env} 
+                  <button
+                    key={env}
                     className={`dropdown-item ${selectedEnvironment === env ? 'selected' : ''}`}
                     onClick={() => handleEnvironmentSelect(env)}
                   >
@@ -2647,11 +2720,11 @@ function App() {
               </div>
             )}
           </div>
-          
+
           {/* 设置按钮 */}
           <div className="dropdown-container" ref={settingsDropdownRef}>
-            <button 
-              className="btn-settings" 
+            <button
+              className="btn-settings"
               onClick={handleSettingsClick}
             >
               ⚙️
@@ -2900,8 +2973,8 @@ function App() {
           <div className="modal-content">
             <div className="modal-header">
               <h3>API设置</h3>
-              <button 
-                className="modal-close" 
+              <button
+                className="modal-close"
                 onClick={() => setShowApiSettings(false)}
               >
                 ×
@@ -2960,14 +3033,14 @@ function App() {
               </div>
             </div>
             <div className="modal-footer">
-              <button 
-                className="btn-secondary" 
+              <button
+                className="btn-secondary"
                 onClick={() => setShowApiSettings(false)}
               >
                 取消
               </button>
-              <button 
-                className="btn-primary" 
+              <button
+                className="btn-primary"
                 onClick={handleSaveApiSettings}
               >
                 保存设置
@@ -2983,8 +3056,8 @@ function App() {
           <div className="modal-content">
             <div className="modal-header">
               <h3>数据库配置</h3>
-              <button 
-                className="modal-close" 
+              <button
+                className="modal-close"
                 onClick={() => setShowDbSettings(false)}
               >
                 ×
@@ -3054,7 +3127,7 @@ function App() {
                           />
                         </div>
                         <div className="db-setting-field">
-                          <button 
+                          <button
                             className={`btn-primary test-connection-btn ${testConnectionStatus['system'] || ''}`}
                             onClick={handleTestSystemDbConnection}
                             disabled={testConnectionStatus['system'] === 'connecting'}
@@ -3084,7 +3157,7 @@ function App() {
                     </div>
                   </div>
                 </div>
-                
+
                 {/* 环境级数据库配置 */}
                 {environmentOptions.map((env) => (
                   <div key={env} className="db-setting-section">
@@ -3110,7 +3183,7 @@ function App() {
                                     <option value="cdus">cdus</option>
                                   </select>
                                 </div>
-                                <button 
+                                <button
                                   className="btn-icon btn-danger"
                                   onClick={() => removeDataSource(env, index)}
                                   title="删除数据源"
@@ -3170,7 +3243,7 @@ function App() {
                                   />
                                 </div>
                                 <div className="db-setting-field">
-                                  <button 
+                                  <button
                                     className={`btn-primary test-connection-btn ${testConnectionStatus[`${env}-${index}`] || ''}`}
                                     onClick={(e) => handleTestConnection(env, index, e)}
                                     disabled={testConnectionStatus[`${env}-${index}`] === 'connecting'}
@@ -3200,7 +3273,7 @@ function App() {
                             </div>
                           ))}
                           {/* 添加数据源按钮 */}
-                          <button 
+                          <button
                             className="btn-icon add-datasource-btn"
                             onClick={() => addDataSource(env)}
                             title="添加数据源"
@@ -3210,7 +3283,7 @@ function App() {
                         </>
                       ) : (
                         <div className="db-empty-state">
-                          <button 
+                          <button
                             className="btn-icon add-datasource-btn"
                             onClick={() => addDataSource(env)}
                             title="添加数据源"
@@ -3225,14 +3298,14 @@ function App() {
               </div>
             </div>
             <div className="modal-footer">
-              <button 
-                className="btn-secondary" 
+              <button
+                className="btn-secondary"
                 onClick={() => setShowDbSettings(false)}
               >
                 取消
               </button>
-              <button 
-                className="btn-primary" 
+              <button
+                className="btn-primary"
                 onClick={handleSaveDbSettings}
               >
                 保存设置
@@ -3248,9 +3321,9 @@ function App() {
           <div className="modal-content">
             <div className="modal-header">
               <h3>系统配置</h3>
-              <button 
-                className="modal-close" 
-                onClick={() => setShowSystemSettings(false)}
+              <button
+                className="modal-close"
+                onClick={handleCancelSystemSettings}
               >
                 ×
               </button>
@@ -3269,7 +3342,7 @@ function App() {
                   />
                 </div>
                 <div className="table-configs">
-                  {Object.entries(systemSettings.tables).filter(([tableName, config]) => {
+                  {Object.entries((draftSystemSettings || systemSettings).tables).filter(([tableName, config]) => {
                     if (!config || typeof config !== 'object') return false;
                     const query = tableSearchQuery.toLowerCase();
                     if (!query) return true;
@@ -3281,7 +3354,7 @@ function App() {
                         <TableNameInput
                           initialName={tableName}
                           onNameChange={(oldName, newName) => {
-                            setSystemSettings(prev => {
+                            setDraftSystemSettings(prev => {
                               const newSettings = { ...prev };
                               const existing = newSettings.tables[oldName];
                               if (existing) {
@@ -3306,7 +3379,7 @@ function App() {
                           type="text"
                           value={config.chineseName || ''}
                           onChange={(e) => {
-                            setSystemSettings(prev => ({
+                            setDraftSystemSettings(prev => ({
                               ...prev,
                               tables: {
                                 ...prev.tables,
@@ -3321,10 +3394,10 @@ function App() {
                           placeholder="中文名"
                           style={{ marginLeft: '10px', flex: 1 }}
                         />
-                        <button 
+                        <button
                           className="btn-icon btn-danger"
                           onClick={() => {
-                            setSystemSettings(prev => {
+                            setDraftSystemSettings(prev => {
                               const newSettings = { ...prev };
                               delete newSettings.tables[tableName];
                               return newSettings;
@@ -3344,7 +3417,7 @@ function App() {
                                 type="text"
                                 value={config.primaryKey || ''}
                                 onChange={(e) => {
-                                  setSystemSettings(prev => ({
+                                  setDraftSystemSettings(prev => ({
                                     ...prev,
                                     tables: {
                                       ...prev.tables,
@@ -3364,7 +3437,7 @@ function App() {
                               <select
                                 value={config.dus || 'bdus'}
                                 onChange={(e) => {
-                                  setSystemSettings(prev => ({
+                                  setDraftSystemSettings(prev => ({
                                     ...prev,
                                     tables: {
                                       ...prev.tables,
@@ -3390,7 +3463,7 @@ function App() {
                                 type="text"
                                 value={config.ignoreFields || ''}
                                 onChange={(e) => {
-                                  setSystemSettings(prev => ({
+                                  setDraftSystemSettings(prev => ({
                                     ...prev,
                                     tables: {
                                       ...prev.tables,
@@ -3407,7 +3480,7 @@ function App() {
                             </div>
                           </div>
                         </div>
-                        
+
                         <h6>查询条件</h6>
                         <div className="condition-fields">
                           {config.conditionFields.map((condition, index) => (
@@ -3419,7 +3492,7 @@ function App() {
                                     type="text"
                                     value={condition.field || ''}
                                     onChange={(e) => {
-                                      setSystemSettings(prev => {
+                                      setDraftSystemSettings(prev => {
                                         const newSettings = { ...prev };
                                         newSettings.tables[tableName].conditionFields[index].field = e.target.value;
                                         return newSettings;
@@ -3434,7 +3507,7 @@ function App() {
                                   <select
                                     value={condition.source || 'request'}
                                     onChange={(e) => {
-                                      setSystemSettings(prev => {
+                                      setDraftSystemSettings(prev => {
                                         const newSettings = { ...prev };
                                         newSettings.tables[tableName].conditionFields[index].source = e.target.value;
                                         return newSettings;
@@ -3458,7 +3531,7 @@ function App() {
                                       <select
                                         value={condition.selectedTable || ''}
                                         onChange={(e) => {
-                                          setSystemSettings(prev => {
+                                          setDraftSystemSettings(prev => {
                                             const newSettings = { ...prev };
                                             newSettings.tables[tableName].conditionFields[index].selectedTable = e.target.value;
                                             newSettings.tables[tableName].conditionFields[index].path = e.target.value ? `${e.target.value}.` : '';
@@ -3468,7 +3541,7 @@ function App() {
                                         className="input"
                                       >
                                         <option value="">请选择表</option>
-                                        {Object.keys(systemSettings.tables).filter(t => t !== tableName).map(t => (
+                                        {Object.keys((draftSystemSettings || systemSettings).tables).filter(t => t !== tableName).map(t => (
                                           <option key={t} value={t}>{t}</option>
                                         ))}
                                       </select>
@@ -3479,7 +3552,7 @@ function App() {
                                         type="text"
                                         value={condition.path ? condition.path.split('.')[1] || '' : ''}
                                         onChange={(e) => {
-                                          setSystemSettings(prev => {
+                                          setDraftSystemSettings(prev => {
                                             const newSettings = { ...prev };
                                             if (condition.selectedTable) {
                                               newSettings.tables[tableName].conditionFields[index].path = `${condition.selectedTable}.${e.target.value}`;
@@ -3501,7 +3574,7 @@ function App() {
                                       type="text"
                                       value={condition.customValue || ''}
                                       onChange={(e) => {
-                                        setSystemSettings(prev => {
+                                        setDraftSystemSettings(prev => {
                                           const newSettings = { ...prev };
                                           newSettings.tables[tableName].conditionFields[index].customValue = e.target.value;
                                           return newSettings;
@@ -3520,7 +3593,7 @@ function App() {
                                       type="text"
                                       value={condition.path || ''}
                                       onChange={(e) => {
-                                        setSystemSettings(prev => {
+                                        setDraftSystemSettings(prev => {
                                           const newSettings = { ...prev };
                                           newSettings.tables[tableName].conditionFields[index].path = e.target.value;
                                           return newSettings;
@@ -3539,7 +3612,7 @@ function App() {
                                     type="checkbox"
                                     checked={condition.required || false}
                                     onChange={(e) => {
-                                      setSystemSettings(prev => {
+                                      setDraftSystemSettings(prev => {
                                         const newSettings = { ...prev };
                                         newSettings.tables[tableName].conditionFields[index].required = e.target.checked;
                                         return newSettings;
@@ -3547,10 +3620,10 @@ function App() {
                                     }}
                                   />
                                 </div>
-                                <button 
+                                <button
                                   className="btn-icon btn-danger"
                                   onClick={() => {
-                                    setSystemSettings(prev => {
+                                    setDraftSystemSettings(prev => {
                                       const newSettings = { ...prev };
                                       newSettings.tables[tableName].conditionFields = newSettings.tables[tableName].conditionFields.filter((_, i) => i !== index);
                                       return newSettings;
@@ -3563,10 +3636,10 @@ function App() {
                               </div>
                             </div>
                           ))}
-                          <button 
+                          <button
                             className="btn-icon add-condition-btn"
                             onClick={() => {
-                              setSystemSettings(prev => {
+                              setDraftSystemSettings(prev => {
                                 const newSettings = { ...prev };
                                 newSettings.tables[tableName].conditionFields.push({
                                   field: '',
@@ -3585,11 +3658,11 @@ function App() {
                       </div>
                     </div>
                   ))}
-                  <button 
+                  <button
                     className="btn-icon add-table-btn"
                     onClick={() => {
                       const newTableName = `new_table_${Date.now()}`;
-                      setSystemSettings(prev => ({
+                      setDraftSystemSettings(prev => ({
                         ...prev,
                         tables: {
                           ...prev.tables,
@@ -3626,14 +3699,14 @@ function App() {
                 </button>
               </div>
               <div className="modal-footer-right">
-                <button 
-                  className="btn-secondary" 
-                  onClick={() => setShowSystemSettings(false)}
+                <button
+                  className="btn-secondary"
+                  onClick={handleCancelSystemSettings}
                 >
                   取消
                 </button>
-                <button 
-                  className="btn-primary" 
+                <button
+                  className="btn-primary"
                   onClick={handleSaveSystemSettings}
                 >
                   保存设置
@@ -3655,9 +3728,9 @@ function App() {
                   默认表配置为系统默认的表规则配置，不可修改，若不符合您的要求，请在<strong style={{ color: 'var(--text-primary)', fontWeight: 'bold' }}>系统配置</strong>中覆盖相应的表规则，系统会优先使用用户自定义规则
                 </div>
               </div>
-              <button 
-                className="modal-close" 
-                onClick={() => setShowDefaultTableSettings(false)}
+              <button
+                className="modal-close"
+                onClick={handleCancelDefaultTableSettings}
               >
                 ×
               </button>
@@ -3676,7 +3749,7 @@ function App() {
                   />
                 </div>
                 <div className="table-configs">
-                  {Object.entries(defaultTableSettings.tables).filter(([tableName, config]) => {
+                  {Object.entries((draftDefaultTableSettings || defaultTableSettings).tables).filter(([tableName, config]) => {
                     if (!config || typeof config !== 'object') return false;
                     const query = defaultTableSearchQuery.toLowerCase();
                     if (!query) return true;
@@ -3688,7 +3761,7 @@ function App() {
                         <TableNameInput
                           initialName={tableName}
                           onNameChange={(oldName, newName) => {
-                            setDefaultTableSettings(prev => {
+                            setDraftDefaultTableSettings(prev => {
                               const newSettings = { ...prev };
                               const existing = newSettings.tables[oldName];
                               if (existing) {
@@ -3713,7 +3786,7 @@ function App() {
                           type="text"
                           value={config.chineseName || ''}
                           onChange={(e) => {
-                            setDefaultTableSettings(prev => ({
+                            setDraftDefaultTableSettings(prev => ({
                               ...prev,
                               tables: {
                                 ...prev.tables,
@@ -3728,10 +3801,10 @@ function App() {
                           placeholder="中文名"
                           style={{ marginLeft: '10px', flex: 1 }}
                         />
-                        <button 
+                        <button
                           className="btn-icon btn-danger"
                           onClick={() => {
-                            setDefaultTableSettings(prev => {
+                            setDraftDefaultTableSettings(prev => {
                               const newSettings = { ...prev };
                               delete newSettings.tables[tableName];
                               return newSettings;
@@ -3751,7 +3824,7 @@ function App() {
                                 type="text"
                                 value={config.primaryKey || ''}
                                 onChange={(e) => {
-                                  setDefaultTableSettings(prev => ({
+                                  setDraftDefaultTableSettings(prev => ({
                                     ...prev,
                                     tables: {
                                       ...prev.tables,
@@ -3771,7 +3844,7 @@ function App() {
                               <select
                                 value={config.dus || 'bdus'}
                                 onChange={(e) => {
-                                  setDefaultTableSettings(prev => ({
+                                  setDraftDefaultTableSettings(prev => ({
                                     ...prev,
                                     tables: {
                                       ...prev.tables,
@@ -3797,7 +3870,7 @@ function App() {
                                 type="text"
                                 value={config.ignoreFields || ''}
                                 onChange={(e) => {
-                                  setDefaultTableSettings(prev => ({
+                                  setDraftDefaultTableSettings(prev => ({
                                     ...prev,
                                     tables: {
                                       ...prev.tables,
@@ -3814,7 +3887,7 @@ function App() {
                             </div>
                           </div>
                         </div>
-                        
+
                         <h6>查询条件</h6>
                         <div className="condition-fields">
                           {config.conditionFields.map((condition, index) => (
@@ -3826,7 +3899,7 @@ function App() {
                                     type="text"
                                     value={condition.field || ''}
                                     onChange={(e) => {
-                                      setDefaultTableSettings(prev => {
+                                      setDraftDefaultTableSettings(prev => {
                                         const newSettings = { ...prev };
                                         newSettings.tables[tableName].conditionFields[index].field = e.target.value;
                                         return newSettings;
@@ -3841,7 +3914,7 @@ function App() {
                                   <select
                                     value={condition.source || 'request'}
                                     onChange={(e) => {
-                                      setDefaultTableSettings(prev => {
+                                      setDraftDefaultTableSettings(prev => {
                                         const newSettings = { ...prev };
                                         newSettings.tables[tableName].conditionFields[index].source = e.target.value;
                                         return newSettings;
@@ -3865,7 +3938,7 @@ function App() {
                                       <select
                                         value={condition.selectedTable || ''}
                                         onChange={(e) => {
-                                          setDefaultTableSettings(prev => {
+                                          setDraftDefaultTableSettings(prev => {
                                             const newSettings = { ...prev };
                                             newSettings.tables[tableName].conditionFields[index].selectedTable = e.target.value;
                                             newSettings.tables[tableName].conditionFields[index].path = e.target.value ? `${e.target.value}.` : '';
@@ -3875,7 +3948,7 @@ function App() {
                                         className="input"
                                       >
                                         <option value="">请选择表</option>
-                                        {Object.keys(defaultTableSettings.tables).filter(t => t !== tableName).map(t => (
+                                        {Object.keys((draftDefaultTableSettings || defaultTableSettings).tables).filter(t => t !== tableName).map(t => (
                                           <option key={t} value={t}>{t}</option>
                                         ))}
                                       </select>
@@ -3886,7 +3959,7 @@ function App() {
                                         type="text"
                                         value={condition.path ? condition.path.split('.')[1] || '' : ''}
                                         onChange={(e) => {
-                                          setDefaultTableSettings(prev => {
+                                          setDraftDefaultTableSettings(prev => {
                                             const newSettings = { ...prev };
                                             if (condition.selectedTable) {
                                               newSettings.tables[tableName].conditionFields[index].path = `${condition.selectedTable}.${e.target.value}`;
@@ -3908,7 +3981,7 @@ function App() {
                                       type="text"
                                       value={condition.customValue || ''}
                                       onChange={(e) => {
-                                        setDefaultTableSettings(prev => {
+                                        setDraftDefaultTableSettings(prev => {
                                           const newSettings = { ...prev };
                                           newSettings.tables[tableName].conditionFields[index].customValue = e.target.value;
                                           return newSettings;
@@ -3927,7 +4000,7 @@ function App() {
                                       type="text"
                                       value={condition.path || ''}
                                       onChange={(e) => {
-                                        setDefaultTableSettings(prev => {
+                                        setDraftDefaultTableSettings(prev => {
                                           const newSettings = { ...prev };
                                           newSettings.tables[tableName].conditionFields[index].path = e.target.value;
                                           return newSettings;
@@ -3946,7 +4019,7 @@ function App() {
                                     type="checkbox"
                                     checked={condition.required || false}
                                     onChange={(e) => {
-                                      setDefaultTableSettings(prev => {
+                                      setDraftDefaultTableSettings(prev => {
                                         const newSettings = { ...prev };
                                         newSettings.tables[tableName].conditionFields[index].required = e.target.checked;
                                         return newSettings;
@@ -3954,10 +4027,10 @@ function App() {
                                     }}
                                   />
                                 </div>
-                                <button 
+                                <button
                                   className="btn-icon btn-danger"
                                   onClick={() => {
-                                    setDefaultTableSettings(prev => {
+                                    setDraftDefaultTableSettings(prev => {
                                       const newSettings = { ...prev };
                                       newSettings.tables[tableName].conditionFields = newSettings.tables[tableName].conditionFields.filter((_, i) => i !== index);
                                       return newSettings;
@@ -3970,10 +4043,10 @@ function App() {
                               </div>
                             </div>
                           ))}
-                          <button 
+                          <button
                             className="btn-icon add-condition-btn"
                             onClick={() => {
-                              setDefaultTableSettings(prev => {
+                              setDraftDefaultTableSettings(prev => {
                                 const newSettings = { ...prev };
                                 newSettings.tables[tableName].conditionFields.push({
                                   field: '',
@@ -3992,11 +4065,11 @@ function App() {
                       </div>
                     </div>
                   ))}
-                  <button 
+                  <button
                     className="btn-icon add-table-btn"
                     onClick={() => {
                       const newTableName = `new_table_${Date.now()}`;
-                      setDefaultTableSettings(prev => ({
+                      setDraftDefaultTableSettings(prev => ({
                         ...prev,
                         tables: {
                           ...prev.tables,
@@ -4033,14 +4106,14 @@ function App() {
                 </button>
               </div>
               <div className="modal-footer-right">
-                <button 
-                  className="btn-secondary" 
-                  onClick={() => setShowDefaultTableSettings(false)}
+                <button
+                  className="btn-secondary"
+                  onClick={handleCancelDefaultTableSettings}
                 >
                   取消
                 </button>
-                <button 
-                  className="btn-primary" 
+                <button
+                  className="btn-primary"
                   onClick={handleSaveDefaultTableSettings}
                 >
                   保存设置
@@ -4113,7 +4186,7 @@ function App() {
                   <code style={{ display: 'block', wordBreak: 'break-all', color: '#ce9178', fontFamily: '"Fira Code", "Consolas", monospace', fontSize: '14px', lineHeight: '1.6' }}>{dataModalContent.afterSql}</code>
                 </div>
               </div>
-              
+
               {dataModalContent.beforeData.length === 0 && dataModalContent.afterData.length === 0 ? (
                 <div className="empty-state" style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-secondary)', backgroundColor: 'var(--bg-lighter)', borderRadius: '6px' }}>
                   <div style={{ fontSize: '24px', marginBottom: '10px' }}>📭</div>
@@ -4142,7 +4215,7 @@ function App() {
               <div className="about-hero">
                 <div className="about-logo">⇌</div>
                 <h2>自动化交易数据断言</h2>
-                <div className="about-version">版本: v1.0.30</div>
+                <div className="about-version">版本: v1.0.31</div>
                 <div className="about-author">By <span>Taylor Zhu</span></div>
               </div>
               <div className="about-desc">
