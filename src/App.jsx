@@ -3942,7 +3942,7 @@ function App() {
               <div className="about-hero">
                 <div className="about-logo">⇌</div>
                 <h2>自动化交易数据断言</h2>
-                <div className="about-version">版本: v1.0.28</div>
+                <div className="about-version">版本: v1.0.29</div>
                 <div className="about-author">By <span>Taylor Zhu</span></div>
               </div>
               <div className="about-desc">

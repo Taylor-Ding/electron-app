@@ -1576,11 +1576,13 @@ body::after {
   padding: 32px 20px;
   position: relative;
   isolation: isolate;
-  background:
-    radial-gradient(circle at 16% 18%, rgba(229, 109, 64, 0.18), transparent 26%),
-    radial-gradient(circle at 78% 84%, rgba(93, 195, 179, 0.16), transparent 28%),
-    radial-gradient(circle at 88% 10%, rgba(123, 199, 255, 0.12), transparent 18%),
-    linear-gradient(135deg, rgba(8, 18, 26, 0.96), rgba(18, 13, 20, 0.94));
+  background-image: 
+    linear-gradient(to bottom right, rgba(8, 18, 26, 0.6), rgba(18, 13, 20, 0.8)),
+    url('./assets/background.png');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
 }
 
 .login-shell::before,
@@ -1615,8 +1617,8 @@ body::after {
 
 .login-card {
   width: 100%;
-  max-width: 440px;
-  padding: 28px;
+  max-width: 380px;
+  padding: 32px 28px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0)),
     rgba(13, 24, 34, 0.72);

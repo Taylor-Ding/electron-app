@@ -34,7 +34,7 @@ function LoginScreen({
           <div className="login-logo">⇌</div>
           <div>
             <div className="login-title">自动化数据断言</div>
-            <div className="login-subtitle">请先登录后再使用数据核对能力</div>
+            <div className="login-subtitle">请先登录后再使用数据核对</div>
           </div>
         </div>
 
@@ -129,7 +129,7 @@ function LoginScreen({
           </button>
         </form>
 
-        <div className="login-hint">
+        {/* <div className="login-hint">
           登录请求将发送至：<code>{`${(authApiBaseUrl || '').replace(/\/$/, '')}/login`}</code>
           <br />
           {captchaEnabled ? (
@@ -137,7 +137,7 @@ function LoginScreen({
           ) : (
             <>当前后端已关闭验证码（captchaEnabled=false）</>
           )}
-        </div>
+        </div> */}
       </div>
     </div>
   );
